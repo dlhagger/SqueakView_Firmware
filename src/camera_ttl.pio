@@ -1,0 +1,40 @@
+.program camera_ttl
+
+; Configuration words, written once before the state machine starts:
+;   1. high-loop count
+;   2. initial-low-loop count
+;   3. repeating-low-loop count
+pull block
+mov isr, osr
+pull block
+mov y, osr
+set pins, 0
+initial_low:
+jmp y-- initial_low
+pull block
+
+.wrap_target
+set pins, 1
+irq 0
+mov x, isr
+high_loop:
+jmp x-- high_loop
+set pins, 0
+mov y, osr
+low_loop:
+jmp y-- low_loop
+.wrap
+
+% c-sdk {
+static inline void camera_ttl_program_init(PIO pio, uint sm, uint offset,
+                                           uint pin, float clock_divider) {
+  pio_gpio_init(pio, pin);
+  pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+
+  pio_sm_config config = camera_ttl_program_get_default_config(offset);
+  sm_config_set_set_pins(&config, pin, 1);
+  sm_config_set_clkdiv(&config, clock_divider);
+  pio_sm_init(pio, sm, offset, &config);
+  pio_sm_set_pins_with_mask(pio, sm, 0, 1u << pin);
+}
+%}
