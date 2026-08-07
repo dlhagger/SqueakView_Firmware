@@ -128,7 +128,6 @@ private:
   static constexpr uint64_t kFeedStepDelayUs = 5000ULL;
   static constexpr uint64_t kFeedRetryStepDelayUs = 5000ULL;
   static constexpr int kMaxFeedRetries = 3;
-  static constexpr unsigned int kSharedEnableSettleUs = 1000U;
   static constexpr unsigned long kMpr121CheckIntervalMs = 60000UL;
   static constexpr size_t kSerialCmdBufferSize = 96;
   static constexpr int kMaxFeedCommandSteps = 100000;
@@ -184,7 +183,6 @@ private:
   unsigned long feedStartCount_ = 0;
   unsigned long feedStopCount_ = 0;
   bool feedActive_ = false;
-  bool sharedEnableIsHigh_ = false;
   int feedStepsLeft_ = 0;
   int feedCurrentStep_ = 0;
   int feedPreferredStepDirection_ = kFeedStepDirection;
@@ -283,8 +281,6 @@ private:
   void updateRightDrink();
 
   void disableFeederOutputs();
-  void setSharedEnable(bool enabled);
-  void refreshSharedEnable();
   bool feedPelletSensorTriggered() const;
   void logFeedPelletArrival(uint64_t nowUs, const char* reason);
   void recordPelletRetrieved(uint64_t nowUnix,

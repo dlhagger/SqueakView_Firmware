@@ -65,15 +65,8 @@ void MouseHouse::logClockStatus(const char* reason) {
 }
 
 void MouseHouse::robustShow() {
-  // GPIO 13 enables the board circuitry used by both the feeder and the
-  // NeoPixels.  The pixels must have that path enabled before data is sent,
-  // even when this show() is turning the final indicator off.
-  bool wasEnabled = sharedEnableIsHigh_;
-  setSharedEnable(true);
-  if (!wasEnabled) delayMicroseconds(kSharedEnableSettleUs);
   strip_.begin();
   strip_.show();
-  refreshSharedEnable();
 }
 
 void MouseHouse::logEvent(const char* eventType,
@@ -587,18 +580,6 @@ void MouseHouse::disableFeederOutputs() {
   digitalWrite(kBIN2, LOW);
 }
 
-void MouseHouse::setSharedEnable(bool enabled) {
-  // Reassert the pin even when our cached state already matches.  This is
-  // intentional for the existing board, where the motor/NeoPixel circuitry
-  // depends on GPIO 13 remaining in the correct hardware state.
-  digitalWrite(kMotorEnablePin, enabled ? HIGH : LOW);
-  sharedEnableIsHigh_ = enabled;
-}
-
-void MouseHouse::refreshSharedEnable() {
-  setSharedEnable(feedActive_ || anyIndicatorsOn());
-}
-
 bool MouseHouse::feedPelletSensorTriggered() const {
   return digitalRead(kPelletSensorPin) == LOW;
 }
@@ -672,7 +653,7 @@ void MouseHouse::startFeedRun(int steps, uint64_t nowUs) {
            steps,
            getContext(),
            kNanString);
-  refreshSharedEnable();
+  digitalWrite(kMotorEnablePin, HIGH);
 }
 
 void MouseHouse::queueFeedRetry(uint64_t nowUs) {
@@ -742,7 +723,7 @@ void MouseHouse::handleFeedPassComplete(uint64_t nowUs) {
 void MouseHouse::feedStop(const char* reason) {
   feedActive_ = false;
   disableFeederOutputs();
-  refreshSharedEnable();
+  digitalWrite(kMotorEnablePin, LOW);
   indicators_.refreshNeeded = indicators_.mainStrip.isOn
                               || indicators_.rightPoke.isOn
                               || indicators_.leftPoke.isOn;
@@ -778,10 +759,6 @@ void MouseHouse::serviceFeed() {
   uint64_t nowUs = time_us_64();
 
   if (!feedActive_) return;
-
-  // Keep the shared board enable asserted throughout a feed, including the
-  // intervals between non-blocking motor steps.
-  refreshSharedEnable();
 
   if (feedPelletSensorTriggered()) {
     handleFeedPelletArrival(time_us_64(), kNanString, "Pellet detected mid-feed");
@@ -822,9 +799,10 @@ void MouseHouse::turnIndicatorOn(IndicatorChannel& channel,
   bool wasOn = channel.isOn;
   bool colorChanged = (!channel.isOn || channel.color != colorVal);
 
+  digitalWrite(kMotorEnablePin, HIGH);
+
   channel.isOn = true;
   channel.color = colorVal;
-  refreshSharedEnable();
 
   if (colorChanged || indicators_.refreshNeeded) {
     renderIndicators();
@@ -857,7 +835,9 @@ void MouseHouse::turnIndicatorOn(IndicatorChannel& channel,
 void MouseHouse::turnIndicatorOff(IndicatorChannel& channel,
                                   const char* eventType) {
   if (!channel.isOn) {
-    refreshSharedEnable();
+    if (!anyIndicatorsOn()) {
+      digitalWrite(kMotorEnablePin, LOW);
+    }
     indicators_.refreshNeeded = false;
     return;
   }
@@ -866,6 +846,10 @@ void MouseHouse::turnIndicatorOff(IndicatorChannel& channel,
   channel.color = 0;
   renderIndicators();
   robustShow();
+
+  if (!anyIndicatorsOn()) {
+    digitalWrite(kMotorEnablePin, LOW);
+  }
 
   indicators_.refreshNeeded = false;
 
@@ -1367,7 +1351,7 @@ void MouseHouse::begin() {
   pinMode(kBIN1, OUTPUT);
   pinMode(kBIN2, OUTPUT);
   pinMode(kMotorEnablePin, OUTPUT);
-  setSharedEnable(false);
+  digitalWrite(kMotorEnablePin, LOW);
   stepper_.setSpeed(kFeedMotorRpm);
 
   framePeriodUs_ = 1000000ULL / fps_;

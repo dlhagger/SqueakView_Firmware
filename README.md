@@ -62,11 +62,30 @@ based on the RP2040 monotonic clock throughout a running session.
 The Jetson utility records synchronization samples and estimates clock drift:
 
 ```sh
-python3 -m pip install -r tools/requirements.txt
-python3 tools/mousehouse_clock_sync.py /dev/ttyACM0 --interval 30
+uv sync --locked
+uv run mousehouse-clock-sync /dev/ttyACM0 --interval 30
+```
+
+The development Python version is recorded in `.python-version`; the utility
+supports Python 3.10 and newer. Commit `uv.lock` when dependencies change. The
+virtual environment created by UV remains local and is ignored by Git.
+
+For compatibility with older deployment commands, the wrapper script remains
+available after `uv sync`:
+
+```sh
+uv run python tools/mousehouse_clock_sync.py /dev/ttyACM0 --interval 30
 ```
 
 Use `--set-rtc` only while the controller is stopped and reports `RTC_INVALID`.
+
+## Startup and hardware failures
+
+Startup intentionally waits for a USB serial connection before initializing the
+rig. A missing DS3231 RTC or MPR121 sensor then prints `ERROR_NO_RTC` or
+`ERROR_NO_MPR121` and halts in a safe state. An RTC with lost power or an
+implausible date leaves the controller responsive to serial commands, but
+`START` returns `NACK,START,RTC_INVALID` until `SET_RTC` succeeds.
 
 The library does not impose default experiment lights. Example sketches decide
 when to call things like `setMainStrip()` and `leftPokeLightOn()`.
@@ -99,7 +118,11 @@ void loop() {
 }
 ```
 
-The `fixed_ratio` example is intended to be compiled as a normal installed Arduino library example with `#include <MouseHouse.h>`.
+The `fixed_ratio` example can also be compiled as a normal installed Arduino
+library example with `#include <MouseHouse.h>`. The generated
+`src/camera_ttl.pio.h` is committed so Arduino builds do not need to invoke
+`pioasm`; the original `src/camera_ttl.pio` remains the editable source. Select
+an RP2040 board using the Arduino-Pico core.
 
 Included now:
 

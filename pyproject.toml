@@ -1,0 +1,19 @@
+[project]
+name = "squeakview-firmware"
+version = "0.1.0"
+description = "Host utilities for the MouseHouse behavioral-rig firmware"
+readme = "README.md"
+authors = [
+    { name = "dlhagger", email = "44274286+dlhagger@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+mousehouse-clock-sync = "squeakview_firmware.clock_sync:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
