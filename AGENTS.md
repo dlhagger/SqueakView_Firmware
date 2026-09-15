@@ -36,7 +36,9 @@ behavior is intentionally direct and must remain as follows:
    state.
 6. Turning an indicator on drives GPIO 13 `HIGH` before updating/showing pixels.
 7. Turning an indicator off shows the updated pixels first, then drives GPIO 13
-   `LOW` only when no indicator channels remain on.
+   `LOW` only when no indicator channels remain on and feeding is inactive.
+   Indicator-off operations must never lower GPIO 13 during an active feed;
+   `feedStop()` remains responsible for the unconditional feeder shutdown.
 
 Do not replace this with a cached shared-enable flag or an expression such as
 `feedActive || anyIndicatorsOn()`. That abstraction was tested on this hardware

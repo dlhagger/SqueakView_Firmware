@@ -93,6 +93,8 @@ void loop() {
   if (activePokeEnded) {
     if (ignoreCurrentActivePoke || mh.isFeedActive()) {
       ignoreCurrentActivePoke = false;
+    } else if (mh.isFeedJammed()) {
+      // Require an operator CLEAR_JAM before accepting another reward.
     } else if (PELLET_MODE == LATCHED_PRESENCE && mh.isPelletAvailable()) {
       // In a latched-well setup, do not count responses toward the next ratio
       // while the previously earned pellet is still sitting in the well.

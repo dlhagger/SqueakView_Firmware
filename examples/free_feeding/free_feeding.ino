@@ -16,12 +16,14 @@ bool pelletNeeded = false;
 bool retryFeedPending = false;
 unsigned long nextFeedAtMs = 0;
 bool feedWasActive = false;
+bool feedWasJammed = false;
 
 void resetTaskState() {
   pelletNeeded = false;
   retryFeedPending = false;
   nextFeedAtMs = 0;
   feedWasActive = false;
+  feedWasJammed = false;
 }
 
 void schedulePelletDelivery(unsigned long dueAtMs, bool isRetry) {
@@ -33,6 +35,20 @@ void schedulePelletDelivery(unsigned long dueAtMs, bool isRetry) {
 void updatePelletDeliveryState(unsigned long nowMs) {
   bool pelletAvailable = mh.isPelletAvailable();
   bool feedActive = mh.isFeedActive();
+  bool feedJammed = mh.isFeedJammed();
+
+  if (feedJammed) {
+    pelletNeeded = false;
+    retryFeedPending = false;
+    feedWasActive = feedActive;
+    feedWasJammed = true;
+    return;
+  }
+
+  if (feedWasJammed && !pelletAvailable) {
+    schedulePelletDelivery(nowMs, false);
+  }
+  feedWasJammed = false;
 
   if (pelletAvailable) {
     pelletNeeded = false;

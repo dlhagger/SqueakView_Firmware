@@ -11,6 +11,7 @@
 class MouseHouse {
 public:
   static constexpr int kDefaultFeedSteps = 300;
+  using SerialCommandHandler = bool (*)(const char* command);
 
   enum PelletSensorMode {
     PELLET_SENSOR_LATCHED_PRESENCE,
@@ -38,6 +39,7 @@ public:
   bool rtcValid() const;
   uint64_t rtcAnchorUncertaintyUs() const;
   void setCompatibilitySerialMode(bool enabled);
+  void setSerialCommandHandler(SerialCommandHandler handler);
   void setTaskContext(const char* context);
 
   void feed(int steps = kDefaultFeedSteps);
@@ -66,6 +68,8 @@ public:
 
   bool isPelletAvailable() const;
   bool isFeedActive() const;
+  bool isFeedJammed() const;
+  bool clearFeedJam();
   void setPelletSensorMode(PelletSensorMode mode);
   PelletSensorMode pelletSensorMode() const;
   void setSensorPollingWhileStopped(bool enabled);
@@ -127,6 +131,7 @@ private:
   static constexpr int kFeedStepDirection = -1;
   static constexpr uint64_t kFeedStepDelayUs = 5000ULL;
   static constexpr uint64_t kFeedRetryStepDelayUs = 5000ULL;
+  static constexpr uint64_t kNeoPixelPowerSettleUs = 2000ULL;
   static constexpr int kMaxFeedRetries = 3;
   static constexpr unsigned long kMpr121CheckIntervalMs = 60000UL;
   static constexpr size_t kSerialCmdBufferSize = 96;
@@ -191,6 +196,7 @@ private:
   uint64_t feedNextStepTime_ = 0;
   int feedRetryCount_ = 0;
   int feedRequestedSteps_ = 0;
+  bool feedJammed_ = false;
 
   bool toneActive_ = false;
   uint64_t toneEndTime_ = 0;
@@ -213,6 +219,7 @@ private:
 
   bool ledFlashActive_ = false;
   uint64_t ledFlashEndTime_ = 0;
+  uint64_t indicatorRefreshDueUs_ = 0;
   IndicatorState indicators_;
 
   bool houseLightIsOn_ = false;
@@ -227,6 +234,7 @@ private:
   size_t serialCmdLength_ = 0;
   bool serialCmdOverflow_ = false;
   bool compatibilitySerialMode_ = false;
+  SerialCommandHandler serialCommandHandler_ = nullptr;
   char taskContext_[32] = "";
 
   uint64_t getTimestampUs() const;
@@ -299,6 +307,8 @@ private:
 
   bool anyIndicatorsOn() const;
   void renderIndicators();
+  void scheduleIndicatorRefresh();
+  void serviceIndicatorRefresh();
   void turnIndicatorOn(IndicatorChannel& channel,
                        uint32_t colorVal,
                        const char* eventType);

@@ -120,6 +120,10 @@ void MouseHouse::setCompatibilitySerialMode(bool enabled) {
   compatibilitySerialMode_ = enabled;
 }
 
+void MouseHouse::setSerialCommandHandler(SerialCommandHandler handler) {
+  serialCommandHandler_ = handler;
+}
+
 void MouseHouse::setTaskContext(const char* context) {
   if (context == nullptr) {
     taskContext_[0] = '\0';
@@ -255,6 +259,8 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
       sendCommandError("START", "RTC_INVALID");
     } else if (!cameraPioReady_) {
       sendCommandError("START", "CAMERA_PIO_UNAVAILABLE");
+    } else if (running_) {
+      sendCommandError("START", "ALREADY_RUNNING");
     } else {
       startSession((uint32_t)fps);
     }
@@ -264,16 +270,29 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
     long steps = 0;
     if (!parseLongStrict(cmd + 5, 1, kMaxFeedCommandSteps, steps)) {
       sendCommandError("FEED", "INVALID_STEPS");
+    } else if (feedJammed_) {
+      sendCommandError("FEED", "JAMMED");
     } else if (feedActive_) {
       sendCommandError("FEED", "ALREADY_ACTIVE");
     } else {
       feed((int)steps);
       if (!compatibilitySerialMode_) Serial.println("ACK_FEED");
     }
+  } else if (strcmp(cmd, "CLEAR_JAM") == 0) {
+    if (feedActive_) {
+      sendCommandError("CLEAR_JAM", "FEED_ACTIVE");
+    } else if (!feedJammed_) {
+      sendCommandError("CLEAR_JAM", "NOT_JAMMED");
+    } else {
+      clearFeedJam();
+      Serial.println("ACK_CLEAR_JAM");
+    }
   } else if (strncmp(cmd, "TIME_SYNC,", 10) == 0) {
     handleTimeSyncCommand(cmd + 10, receivedUs);
   } else if (strncmp(cmd, "SET_RTC,", 8) == 0) {
     handleSetRtcCommand(cmd + 8);
+  } else if (serialCommandHandler_ != nullptr && serialCommandHandler_(cmd)) {
+    // The active sketch accepted an application-specific command.
   } else {
     sendCommandError("UNKNOWN", "UNKNOWN_COMMAND");
   }
@@ -714,6 +733,7 @@ void MouseHouse::handleFeedPassComplete(uint64_t nowUs) {
   } else if (feedRetryCount_ < kMaxFeedRetries) {
     queueFeedRetry(nowUs);
   } else {
+    feedJammed_ = true;
     logFeedJam(nowUs);
     feedStop("Feeder Jammed: User Check");
     feedRetryCount_ = 0;
@@ -727,6 +747,7 @@ void MouseHouse::feedStop(const char* reason) {
   indicators_.refreshNeeded = indicators_.mainStrip.isOn
                               || indicators_.rightPoke.isOn
                               || indicators_.leftPoke.isOn;
+  indicatorRefreshDueUs_ = 0;
 
   feedStopCount_++;
 
@@ -750,7 +771,7 @@ void MouseHouse::feedStop(const char* reason) {
 void MouseHouse::feed(int steps) {
   uint64_t nowUs = time_us_64();
 
-  if (steps > 0 && !feedActive_) {
+  if (steps > 0 && !feedActive_ && !feedJammed_) {
     startFeedRun(steps, nowUs);
   }
 }
@@ -793,6 +814,26 @@ void MouseHouse::renderIndicators() {
   strip_.setPixelColor(kLeftPokeLedIndex, leftPokeColor);
 }
 
+void MouseHouse::scheduleIndicatorRefresh() {
+  // GPIO 13 switches power to the pixels. Schedule the transmission after the
+  // original FED3 hardware's 2 ms power-settling interval without blocking
+  // feeder, sensor, serial, or camera services.
+  if (!indicators_.refreshNeeded || indicatorRefreshDueUs_ == 0) {
+    indicatorRefreshDueUs_ = time_us_64() + kNeoPixelPowerSettleUs;
+  }
+  indicators_.refreshNeeded = true;
+}
+
+void MouseHouse::serviceIndicatorRefresh() {
+  if (!indicators_.refreshNeeded || indicatorRefreshDueUs_ == 0) return;
+  if (time_us_64() < indicatorRefreshDueUs_) return;
+
+  renderIndicators();
+  robustShow();
+  indicators_.refreshNeeded = false;
+  indicatorRefreshDueUs_ = 0;
+}
+
 void MouseHouse::turnIndicatorOn(IndicatorChannel& channel,
                                  uint32_t colorVal,
                                  const char* eventType) {
@@ -805,8 +846,7 @@ void MouseHouse::turnIndicatorOn(IndicatorChannel& channel,
   channel.color = colorVal;
 
   if (colorChanged || indicators_.refreshNeeded) {
-    renderIndicators();
-    robustShow();
+    scheduleIndicatorRefresh();
   }
 
   bool suppressEvent = compatibilitySerialMode_
@@ -829,16 +869,14 @@ void MouseHouse::turnIndicatorOn(IndicatorChannel& channel,
   }
 
   channel.lastColor = colorVal;
-  indicators_.refreshNeeded = false;
 }
 
 void MouseHouse::turnIndicatorOff(IndicatorChannel& channel,
                                   const char* eventType) {
   if (!channel.isOn) {
-    if (!anyIndicatorsOn()) {
+    if (!feedActive_ && !anyIndicatorsOn() && !indicators_.refreshNeeded) {
       digitalWrite(kMotorEnablePin, LOW);
     }
-    indicators_.refreshNeeded = false;
     return;
   }
 
@@ -847,11 +885,11 @@ void MouseHouse::turnIndicatorOff(IndicatorChannel& channel,
   renderIndicators();
   robustShow();
 
-  if (!anyIndicatorsOn()) {
+  if (!anyIndicatorsOn() && !feedActive_) {
     digitalWrite(kMotorEnablePin, LOW);
+    indicators_.refreshNeeded = false;
+    indicatorRefreshDueUs_ = 0;
   }
-
-  indicators_.refreshNeeded = false;
 
   bool suppressEvent = compatibilitySerialMode_
                        && (strcmp(eventType, "LEFT_POKE_LIGHT_OFF") == 0
@@ -1125,6 +1163,26 @@ void MouseHouse::updateTimeout() {
   if (!timeoutActive_) return;
 
   if (time_us_64() >= timeoutEndTime_) {
+    bool timeoutWasSignaling = timeoutOwnsTone_
+                               || clickPatternActive_
+                               || clickPatternEndPending_;
+
+    if (timeoutWasSignaling && toneActive_) {
+      noTone(kBuzzerPin);
+      toneActive_ = false;
+
+      logEvent("TONE_END",
+               getTimestampUs(), time_us_64(),
+               kNanString,
+               kNotApplicable,
+               kNotApplicable,
+               kNotApplicable,
+               lastToneFreq_,
+               getContext(),
+               kNanString);
+    }
+
+    clearClickPattern();
     timeoutActive_ = false;
     timeoutEndTime_ = 0;
     timeoutJustEnded_ = true;
@@ -1296,6 +1354,7 @@ void MouseHouse::drainCameraEvents() {
 void MouseHouse::updateBackgroundServices() {
   checkSerialCommands();
   serviceFeed();
+  serviceIndicatorRefresh();
   checkMPR121Health();
   updateTone();
   updateClickPattern();
@@ -1544,6 +1603,19 @@ bool MouseHouse::isPelletAvailable() const {
 
 bool MouseHouse::isFeedActive() const {
   return feedActive_;
+}
+
+bool MouseHouse::isFeedJammed() const {
+  return feedJammed_;
+}
+
+bool MouseHouse::clearFeedJam() {
+  if (feedActive_ || !feedJammed_) return false;
+
+  feedJammed_ = false;
+  feedRetryCount_ = 0;
+  feedPreferredStepDirection_ = kFeedStepDirection;
+  return true;
 }
 
 void MouseHouse::setPelletSensorMode(PelletSensorMode mode) {

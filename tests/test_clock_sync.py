@@ -78,6 +78,10 @@ class ClockSyncTests(unittest.TestCase):
         with self.assertRaises(argparse.ArgumentTypeError):
             positive_float("0")
         with self.assertRaises(argparse.ArgumentTypeError):
+            positive_float("nan")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            positive_float("inf")
+        with self.assertRaises(argparse.ArgumentTypeError):
             non_negative_int("-1")
 
 
