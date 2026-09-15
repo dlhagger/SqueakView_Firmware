@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 mousehouse-clock-sync = "squeakview_firmware.clock_sync:main"
+mousehouse-clock-validate = "squeakview_firmware.clock_validation:main"
 mousehouse-setup = "squeakview_firmware.qualification_gui:main"
 
 [build-system]

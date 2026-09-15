@@ -24,6 +24,11 @@ public:
     TIMEOUT_STEADY_TONE
   };
 
+  enum HouseLightTimeBasis {
+    HOUSE_LIGHT_RTC_TIME,
+    HOUSE_LIGHT_US_EASTERN
+  };
+
   MouseHouse();
 
   void begin();
@@ -38,6 +43,9 @@ public:
   uint64_t timestampUs() const;
   bool rtcValid() const;
   uint64_t rtcAnchorUncertaintyUs() const;
+  void setHouseLightSchedule(uint8_t onHour, uint8_t onMinute,
+                             uint8_t offHour, uint8_t offMinute,
+                             HouseLightTimeBasis timeBasis = HOUSE_LIGHT_RTC_TIME);
   void setCompatibilitySerialMode(bool enabled);
   void setSerialCommandHandler(SerialCommandHandler handler);
   void setTaskContext(const char* context);
@@ -223,6 +231,9 @@ private:
   IndicatorState indicators_;
 
   bool houseLightIsOn_ = false;
+  uint16_t houseLightOnMinuteOfDay_ = 5U * 60U;
+  uint16_t houseLightOffMinuteOfDay_ = 17U * 60U;
+  HouseLightTimeBasis houseLightTimeBasis_ = HOUSE_LIGHT_RTC_TIME;
 
   unsigned long lastMpr121Check_ = 0;
   unsigned long lastHouseLightCheck_ = 0;
@@ -326,6 +337,7 @@ private:
   void updateTimeout();
   void houseLightOn();
   void houseLightOff();
+  DateTime houseLightScheduleTime(const DateTime& rtcTime) const;
   void updateHouseLight();
 
   bool initializeCameraPio();

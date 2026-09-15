@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-PROTOCOL_VERSION = "1"
+PROTOCOL_VERSION = "2"
 
 CHECK_LABELS = {
     "rtc": "RTC clock",
@@ -35,9 +35,9 @@ ACTION_TEXT = {
         "Identify this unit",
         "Enter the identifier that should appear in its deployment record.",
     ),
-    "SET_RTC_FROM_HOST": (
-        "Set the real-time clock",
-        "The controller clock is invalid. Use the button below to copy this computer's time.",
+    "VALIDATE_RTC_AGAINST_JETSON": (
+        "Validate the controller clock",
+        "Compare the idle controller against this Jetson's NTP-synchronized UTC clock before continuing.",
     ),
     "ENTER_AND_LEAVE_LEFT_POKE": (
         "Test the left poke",

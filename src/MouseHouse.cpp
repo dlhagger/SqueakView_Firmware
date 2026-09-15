@@ -64,6 +64,20 @@ void MouseHouse::logClockStatus(const char* reason) {
   Serial.println(reason ? reason : kNanString);
 }
 
+void MouseHouse::setHouseLightSchedule(uint8_t onHour, uint8_t onMinute,
+                                       uint8_t offHour, uint8_t offMinute,
+                                       HouseLightTimeBasis timeBasis) {
+  if (onHour >= 24 || offHour >= 24 || onMinute >= 60 || offMinute >= 60) {
+    return;
+  }
+
+  houseLightOnMinuteOfDay_ = ((uint16_t)onHour * 60U) + onMinute;
+  houseLightOffMinuteOfDay_ = ((uint16_t)offHour * 60U) + offMinute;
+  houseLightTimeBasis_ = timeBasis;
+  // Force the next update() call to apply the newly selected schedule.
+  lastHouseLightCheck_ = millis() - kHouseLightCheckIntervalMs;
+}
+
 void MouseHouse::robustShow() {
   strip_.begin();
   strip_.show();
@@ -207,6 +221,7 @@ void MouseHouse::handleTimeSyncCommand(const char* arguments, uint64_t receivedU
   }
 
   uint64_t transmitUs = time_us_64();
+  uint64_t controllerUnixUs = baseUnixUs_ + (transmitUs - baseUs_);
   Serial.print("CLOCK_SYNC,");
   Serial.print(sequence);
   Serial.print(",");
@@ -216,7 +231,7 @@ void MouseHouse::handleTimeSyncCommand(const char* arguments, uint64_t receivedU
   Serial.print(",");
   Serial.print(transmitUs);
   Serial.print(",");
-  Serial.print(getTimestampUs());
+  Serial.print(controllerUnixUs);
   Serial.print(",");
   Serial.println(rtcValid_ ? "RTC_VALID" : "RTC_INVALID");
 }
@@ -288,7 +303,11 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
       Serial.println("ACK_CLEAR_JAM");
     }
   } else if (strncmp(cmd, "TIME_SYNC,", 10) == 0) {
-    handleTimeSyncCommand(cmd + 10, receivedUs);
+    if (running_ || feedActive_) {
+      sendCommandError("TIME_SYNC", "DEVICE_BUSY");
+    } else {
+      handleTimeSyncCommand(cmd + 10, receivedUs);
+    }
   } else if (strncmp(cmd, "SET_RTC,", 8) == 0) {
     handleSetRtcCommand(cmd + 8);
   } else if (serialCommandHandler_ != nullptr && serialCommandHandler_(cmd)) {
@@ -1241,16 +1260,47 @@ void MouseHouse::houseLightOff() {
   }
 }
 
+DateTime MouseHouse::houseLightScheduleTime(const DateTime& rtcTime) const {
+  if (houseLightTimeBasis_ != HOUSE_LIGHT_US_EASTERN) return rtcTime;
+
+  int year = rtcTime.year();
+  uint8_t marchFirstWeekday = DateTime(year, 3, 1).dayOfTheWeek();
+  uint8_t novemberFirstWeekday = DateTime(year, 11, 1).dayOfTheWeek();
+  uint8_t secondSundayMarch = 8U + ((7U - marchFirstWeekday) % 7U);
+  uint8_t firstSundayNovember = 1U + ((7U - novemberFirstWeekday) % 7U);
+
+  // US Eastern DST begins at 02:00 EST (07:00 UTC) on the second Sunday in
+  // March and ends at 02:00 EDT (06:00 UTC) on the first Sunday in November.
+  uint32_t dstStartUtc = DateTime(year, 3, secondSundayMarch, 7, 0, 0).unixtime();
+  uint32_t dstEndUtc = DateTime(year, 11, firstSundayNovember, 6, 0, 0).unixtime();
+  uint32_t utcSeconds = rtcTime.unixtime();
+  uint32_t offsetSeconds = (utcSeconds >= dstStartUtc && utcSeconds < dstEndUtc)
+                               ? 4UL * 60UL * 60UL
+                               : 5UL * 60UL * 60UL;
+  return DateTime(utcSeconds - offsetSeconds);
+}
+
 void MouseHouse::updateHouseLight() {
   unsigned long nowMs = millis();
   if ((unsigned long)(nowMs - lastHouseLightCheck_) < kHouseLightCheckIntervalMs) return;
   lastHouseLightCheck_ = nowMs;
   if (!rtcValid_) return;
 
-  DateTime now = rtc_.now();
-  int hour = now.hour();
+  DateTime now = houseLightScheduleTime(rtc_.now());
+  uint16_t minuteOfDay = ((uint16_t)now.hour() * 60U) + now.minute();
+  bool shouldBeOn = false;
 
-  if (hour >= 5 && hour < 17) {
+  if (houseLightOnMinuteOfDay_ < houseLightOffMinuteOfDay_) {
+    shouldBeOn = minuteOfDay >= houseLightOnMinuteOfDay_
+                 && minuteOfDay < houseLightOffMinuteOfDay_;
+  } else if (houseLightOnMinuteOfDay_ > houseLightOffMinuteOfDay_) {
+    // An on-time later than the off-time describes a schedule spanning
+    // midnight, such as 19:33 through 07:33.
+    shouldBeOn = minuteOfDay >= houseLightOnMinuteOfDay_
+                 || minuteOfDay < houseLightOffMinuteOfDay_;
+  }
+
+  if (shouldBeOn) {
     houseLightOn();
   } else {
     houseLightOff();

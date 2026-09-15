@@ -32,6 +32,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .clock_sync import parse_clock_response
+from .clock_validation import (
+    DEFAULT_BEST_SAMPLE_COUNT,
+    DEFAULT_MAX_OFFSET_SECONDS,
+    DEFAULT_SAMPLE_COUNT,
+    host_time_status,
+    summarize_samples,
+)
 from .qualification import CHECK_LABELS, PROTOCOL_VERSION, QualificationState, parse_fields
 
 
@@ -77,6 +85,12 @@ class QualificationWindow(QMainWindow):
         self.saved_record_line = ""
         self.output_directory = Path.home() / "MouseHouseQualificationLogs"
         self.check_items: dict[str, QTreeWidgetItem] = {}
+        self.clock_validation_record: dict[str, object] | None = None
+        self.clock_gate_state = "idle"
+        self.clock_gate_samples: list[dict[str, object]] = []
+        self.clock_gate_pending_sequence: int | None = None
+        self.clock_gate_pending_sent_ns: int | None = None
+        self.clock_gate_after_correction = False
         self._build_ui()
         self.setStyleSheet(APP_STYLE)
 
@@ -205,8 +219,8 @@ class QualificationWindow(QMainWindow):
         self.special_row = QWidget()
         special_layout = QHBoxLayout(self.special_row)
         special_layout.setContentsMargins(0, 0, 0, 0)
-        self.rtc_button = QPushButton("Set RTC from this computer")
-        self.rtc_button.clicked.connect(self.set_rtc)
+        self.rtc_button = QPushButton("Validate clock against Jetson")
+        self.rtc_button.clicked.connect(self.clock_gate_action)
         self.clear_jam_button = QPushButton("I cleared the mechanism — Clear Jam")
         self.clear_jam_button.clicked.connect(lambda: self.send_command("CLEAR_JAM"))
         self.camera_start_button = QPushButton("Start 30 FPS")
@@ -318,6 +332,7 @@ class QualificationWindow(QMainWindow):
         self.rx_buffer.clear()
         self.transcript.clear()
         self.saved_record_line = ""
+        self._reset_clock_gate()
         self.output_directory = Path(self.output_edit.text()).expanduser()
         try:
             self.output_directory.mkdir(parents=True, exist_ok=True)
@@ -369,10 +384,17 @@ class QualificationWindow(QMainWindow):
             self.rx_buffer = bytearray(remainder)
             line = raw.decode(errors="replace").strip("\r ")
             if line:
-                self._handle_line(line)
+                self._handle_line(line, time.time_ns())
 
-    def _handle_line(self, line: str) -> None:
+    def _handle_line(self, line: str, received_ns: int | None = None) -> None:
         self._append_log(line, "RX")
+        if line.startswith("CLOCK_SYNC,"):
+            self._handle_clock_sync_response(line, received_ns or time.time_ns())
+        elif line.startswith("ACK_SET_RTC,") and self.clock_gate_state == "correcting":
+            if self.clock_validation_record is not None:
+                self.clock_validation_record["set_rtc_ack"] = line
+                self.clock_validation_record["correction_applied"] = True
+            QTimer.singleShot(100, lambda: self._start_clock_validation(True))
         event = self.state.apply_line(line)
         if line.startswith("SETUP_LED_TEST,"):
             color = line.split(",", 1)[1]
@@ -383,6 +405,8 @@ class QualificationWindow(QMainWindow):
             step = values.get("step", "test").replace("_", " ").title()
             self.notice.setText(f"{step}: {result}")
         elif event == "error":
+            if line.startswith("NACK,TIME_SYNC,") or line.startswith("NACK,SET_RTC,"):
+                self._fail_clock_gate("CONTROLLER_REJECTED_CLOCK_COMMAND", line)
             if not self.state.protocol_version:
                 self.notice.setText(
                     "This is not the matching setup_debug firmware. Flash the current build and reconnect."
@@ -425,8 +449,163 @@ class QualificationWindow(QMainWindow):
             return
         self.send_command(f"TEST,DEVICE,{device_id}")
 
-    def set_rtc(self) -> None:
-        self.send_command(f"SET_RTC,{int(time.time())}")
+    def _reset_clock_gate(self) -> None:
+        self.clock_validation_record = None
+        self.clock_gate_state = "idle"
+        self.clock_gate_samples = []
+        self.clock_gate_pending_sequence = None
+        self.clock_gate_pending_sent_ns = None
+        self.clock_gate_after_correction = False
+
+    def clock_gate_action(self) -> None:
+        if self.clock_gate_state == "correction_required":
+            self.clock_gate_state = "correcting"
+            self.notice.setText("Correcting the idle RTC from Jetson UTC…")
+            self.send_command(f"SET_RTC,{int(time.time() + 0.5)}")
+            self._render()
+            return
+        self._start_clock_validation(False)
+
+    def _start_clock_validation(self, after_correction: bool) -> None:
+        if self.port is None or self.state.stage != "RTC":
+            return
+        if not after_correction:
+            try:
+                status = host_time_status()
+            except RuntimeError as exc:
+                self.clock_validation_record = {
+                    "result": "FAIL",
+                    "reason": "JETSON_TIME_STATUS_UNAVAILABLE",
+                    "error": str(exc),
+                }
+                self.clock_gate_state = "failed"
+                self.notice.setText(f"Clock validation failed: {exc}")
+                self._render()
+                return
+            self.clock_validation_record = {
+                "host": status,
+                "max_offset_seconds": DEFAULT_MAX_OFFSET_SECONDS,
+                "correction_applied": False,
+            }
+            if not status["ntp_synchronized"]:
+                self.clock_validation_record.update(
+                    result="FAIL", reason="JETSON_NTP_NOT_SYNCHRONIZED"
+                )
+                self.clock_gate_state = "failed"
+                self.notice.setText(
+                    "Jetson NTP is not synchronized. Fix host time before qualification."
+                )
+                self._render()
+                return
+
+        self.clock_gate_after_correction = after_correction
+        self.clock_gate_samples = []
+        self.clock_gate_pending_sequence = None
+        self.clock_gate_pending_sent_ns = None
+        self.clock_gate_state = "validating_after" if after_correction else "validating_before"
+        self.notice.setText(
+            f"Collecting clock sample 1 of {DEFAULT_SAMPLE_COUNT}…"
+        )
+        self._send_clock_sample()
+        self._render()
+
+    def _send_clock_sample(self) -> None:
+        if self.port is None or not self.clock_gate_state.startswith("validating"):
+            return
+        sequence_base = DEFAULT_SAMPLE_COUNT if self.clock_gate_after_correction else 0
+        sequence = sequence_base + len(self.clock_gate_samples)
+        sent_ns = time.time_ns()
+        self.clock_gate_pending_sequence = sequence
+        self.clock_gate_pending_sent_ns = sent_ns
+        command = f"TIME_SYNC,{sequence},{sent_ns}"
+        try:
+            self.port.write(f"{command}\n".encode())
+            self.port.flush()
+            self._append_log(command, "TX")
+        except (serial.SerialException, OSError) as exc:
+            self._fail_clock_gate("SERIAL_WRITE_FAILED", str(exc))
+            return
+        QTimer.singleShot(3000, lambda expected=sequence: self._clock_sample_timeout(expected))
+
+    def _clock_sample_timeout(self, expected_sequence: int) -> None:
+        if (
+            self.clock_gate_state.startswith("validating")
+            and self.clock_gate_pending_sequence == expected_sequence
+        ):
+            self._fail_clock_gate("CLOCK_RESPONSE_TIMEOUT", f"sequence={expected_sequence}")
+
+    def _handle_clock_sync_response(self, line: str, received_ns: int) -> None:
+        sequence = self.clock_gate_pending_sequence
+        sent_ns = self.clock_gate_pending_sent_ns
+        if sequence is None or sent_ns is None:
+            return
+        try:
+            sample = parse_clock_response(line, sequence, sent_ns, received_ns)
+        except (ValueError, TypeError) as exc:
+            self._fail_clock_gate("INVALID_CLOCK_RESPONSE", str(exc))
+            return
+        self.clock_gate_pending_sequence = None
+        self.clock_gate_pending_sent_ns = None
+        self.clock_gate_samples.append(sample)
+        count = len(self.clock_gate_samples)
+        if count < DEFAULT_SAMPLE_COUNT:
+            self.notice.setText(
+                f"Collecting clock sample {count + 1} of {DEFAULT_SAMPLE_COUNT}…"
+            )
+            QTimer.singleShot(100, self._send_clock_sample)
+        else:
+            self._finish_clock_validation()
+
+    def _finish_clock_validation(self) -> None:
+        summary = summarize_samples(
+            self.clock_gate_samples, DEFAULT_BEST_SAMPLE_COUNT
+        )
+        record = self.clock_validation_record
+        if record is None:
+            record = {}
+            self.clock_validation_record = record
+        phase = "after" if self.clock_gate_after_correction else "before"
+        record[phase] = summary
+        record[f"{phase}_samples"] = list(self.clock_gate_samples)
+        offset = float(summary["median_offset_seconds"])
+        passed = bool(summary["all_rtc_valid"]) and abs(offset) <= DEFAULT_MAX_OFFSET_SECONDS
+        if passed:
+            record.update(
+                result="PASS",
+                reason=(
+                    "CLOCK_CORRECTED_AND_VERIFIED"
+                    if self.clock_gate_after_correction
+                    else "CLOCK_WITHIN_TOLERANCE"
+                ),
+            )
+            self.clock_gate_state = "passed"
+            self.notice.setText(
+                f"Clock validation passed: controller offset {offset:+.6f} seconds."
+            )
+            self.send_command("TEST,RTC_VERIFIED")
+        elif self.clock_gate_after_correction:
+            record.update(result="FAIL", reason="CLOCK_CORRECTION_FAILED")
+            self.clock_gate_state = "failed"
+            self.notice.setText(
+                f"Clock correction failed verification: offset {offset:+.6f} seconds."
+            )
+        else:
+            record.update(result="FAIL", reason="CLOCK_CORRECTION_REQUIRED")
+            self.clock_gate_state = "correction_required"
+            self.notice.setText(
+                f"Controller offset is {offset:+.6f} seconds. Correct and verify it before continuing."
+            )
+        self._render()
+
+    def _fail_clock_gate(self, reason: str, detail: str) -> None:
+        if self.clock_validation_record is None:
+            self.clock_validation_record = {}
+        self.clock_validation_record.update(result="FAIL", reason=reason, error=detail)
+        self.clock_gate_state = "failed"
+        self.clock_gate_pending_sequence = None
+        self.clock_gate_pending_sent_ns = None
+        self.notice.setText(f"Clock validation failed: {detail}")
+        self._render()
 
     def restart_qualification(self) -> None:
         answer = QMessageBox.question(
@@ -435,6 +614,7 @@ class QualificationWindow(QMainWindow):
             "This clears the current in-memory checklist and begins again.",
         )
         if answer == QMessageBox.StandardButton.Yes:
+            self._reset_clock_gate()
             self.send_command("TEST,RESTART")
 
     def _append_log(self, line: str, direction: str) -> None:
@@ -463,7 +643,12 @@ class QualificationWindow(QMainWindow):
             base.with_suffix(".txt").write_text(line + "\n", encoding="utf-8")
             base.with_suffix(".json").write_text(
                 json.dumps(
-                    {"record": record, "raw_record": line, "transcript": self.transcript},
+                    {
+                        "record": record,
+                        "raw_record": line,
+                        "clock_validation": self.clock_validation_record,
+                        "transcript": self.transcript,
+                    },
                     indent=2,
                 )
                 + "\n",
@@ -496,7 +681,23 @@ class QualificationWindow(QMainWindow):
         self.yes_button.setVisible(confirming)
         self.no_button.setVisible(confirming)
         self.retry_button.setVisible(confirming)
-        self.rtc_button.setVisible(protocol_ok and stage == "RTC")
+        clock_stage = protocol_ok and stage == "RTC"
+        self.rtc_button.setVisible(clock_stage)
+        if self.clock_gate_state == "correction_required":
+            self.rtc_button.setText("Correct RTC and verify")
+        elif self.clock_gate_state in {"validating_before", "validating_after"}:
+            self.rtc_button.setText("Validating clock…")
+        elif self.clock_gate_state == "correcting":
+            self.rtc_button.setText("Correcting RTC…")
+        elif self.clock_gate_state == "failed":
+            self.rtc_button.setText("Retry clock validation")
+        else:
+            self.rtc_button.setText("Validate clock against Jetson")
+        self.rtc_button.setEnabled(
+            clock_stage
+            and self.clock_gate_state
+            not in {"validating_before", "validating_after", "correcting", "passed"}
+        )
         self.clear_jam_button.setVisible(protocol_ok and stage == "JAM_CLEAR")
         camera = protocol_ok and stage == "CAMERA_CYCLE"
         self.camera_start_button.setVisible(camera)

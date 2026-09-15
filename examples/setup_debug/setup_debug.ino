@@ -13,7 +13,7 @@ constexpr unsigned long TEST_OBSERVATION_MS = 750;
 constexpr unsigned long COLOR_TEST_STEP_MS = 600;
 constexpr int GPIO13_TEST_PIN = 13;
 constexpr size_t DEVICE_ID_SIZE = 32;
-constexpr int QUALIFICATION_PROTOCOL_VERSION = 1;
+constexpr int QUALIFICATION_PROTOCOL_VERSION = 2;
 
 enum QualificationStage {
   STAGE_DEVICE_ID, STAGE_RTC, STAGE_LEFT_POKE, STAGE_RIGHT_POKE,
@@ -235,7 +235,7 @@ void printPrompt() {
   Serial.print(",action=");
   switch (stage) {
     case STAGE_DEVICE_ID: Serial.println("ENTER_DEVICE_ID"); break;
-    case STAGE_RTC: Serial.println("SET_RTC_FROM_HOST"); break;
+    case STAGE_RTC: Serial.println("VALIDATE_RTC_AGAINST_JETSON"); break;
     case STAGE_LEFT_POKE: Serial.println("ENTER_AND_LEAVE_LEFT_POKE"); break;
     case STAGE_RIGHT_POKE: Serial.println("ENTER_AND_LEAVE_RIGHT_POKE"); break;
     case STAGE_PELLET_BLOCK: Serial.println("BLOCK_PELLET_BEAM"); break;
@@ -300,7 +300,16 @@ bool handleSetupCommand(const char* command) {
       strncpy(deviceId, value, sizeof(deviceId) - 1);
       deviceId[sizeof(deviceId) - 1] = '\0';
       Serial.print("ACK_TEST_DEVICE,"); Serial.println(deviceId);
-      setStage(mh.rtcValid() ? STAGE_LEFT_POKE : STAGE_RTC);
+      setStage(STAGE_RTC);
+    }
+    return true;
+  }
+  if (strcmp(command, "TEST,RTC_VERIFIED") == 0) {
+    if (stage != STAGE_RTC) Serial.println("NACK,TEST,RTC_VERIFICATION_NOT_EXPECTED");
+    else if (!mh.rtcValid()) Serial.println("NACK,TEST,RTC_INVALID");
+    else {
+      passCheck(checks.rtc, "RTC_JETSON_VALIDATION");
+      setStage(STAGE_LEFT_POKE);
     }
     return true;
   }
@@ -595,12 +604,12 @@ void setup() {
   lastFeedActive = mh.isFeedActive();
   lastFeedJammed = mh.isFeedJammed();
   lastRunning = mh.isRunning();
-  checks.rtc = mh.rtcValid();
+  checks.rtc = false;
   Serial.println("SETUP_DEBUG_READY,mode=GUIDED_QUALIFICATION");
   Serial.print("SETUP_PROTOCOL,version=");
   Serial.print(QUALIFICATION_PROTOCOL_VERSION);
   Serial.println(",mode=GUIDED_QUALIFICATION");
-  Serial.println("SETUP_COMMANDS,TEST,DEVICE,<id>|TEST,YES|TEST,NO|TEST,RETRY|TEST,STATUS|TEST,ABORT|TEST,RESTART");
+  Serial.println("SETUP_COMMANDS,TEST,DEVICE,<id>|TEST,RTC_VERIFIED|TEST,YES|TEST,NO|TEST,RETRY|TEST,STATUS|TEST,ABORT|TEST,RESTART");
   Serial.println("SETUP_STORAGE,serial=ACTIVE,sd=TODO");
   Serial.println("SETUP_SAFETY,MOTOR_STARTS_ONLY_AFTER_PROMPTED_POKE");
   setStage(STAGE_DEVICE_ID);
@@ -609,9 +618,6 @@ void setup() {
 void loop() {
   mh.update();
   unsigned long nowMs = millis();
-  if (stage == STAGE_RTC && mh.rtcValid()) {
-    passCheck(checks.rtc, "RTC"); setStage(STAGE_LEFT_POKE);
-  }
   if (stage == STAGE_FEED_DARK_CLEAR && !mh.pelletSensorBlocked()) {
     setStage(STAGE_FEED_LIGHT);
   } else if (stage == STAGE_FEED_LIGHT_CLEAR && !mh.pelletSensorBlocked()) {

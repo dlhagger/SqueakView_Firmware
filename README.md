@@ -42,11 +42,16 @@ raw monitor, begin by assigning the unit an identifier:
 TEST,DEVICE,MH-012
 ```
 
-The wizard then requests complete left/right poke cycles, a pellet-beam
-block/clear cycle, and complete left/right drink cycles. Those inputs advance
-automatically only after the requested physical transition is observed. It
-then performs a nonblocking red, green, blue, white, and off LED sweep and asks
-the operator to answer with `TEST,YES`, `TEST,NO`, or `TEST,RETRY`.
+After the device ID, the GUI requires the same NTP-backed clock validation used
+by `mousehouse-clock-validate`. A plausible RTC date alone cannot pass. The GUI
+collects seven samples, uses the three lowest-latency exchanges, explicitly
+offers RTC correction when needed, verifies the result, and embeds the clock
+evidence in the final JSON qualification record. The wizard then requests
+complete left/right poke cycles, a pellet-beam block/clear cycle, and complete
+left/right drink cycles. Those inputs advance automatically only after the
+requested physical transition is observed. It then performs a nonblocking red,
+green, blue, white, and off LED sweep and asks the operator to answer with
+`TEST,YES`, `TEST,NO`, or `TEST,RETRY`.
 
 NeoPixels remain off during sensor-only stages because the GUI provides sensor
 feedback. They are energized only by the RGBW sweep and the explicit
@@ -128,11 +133,12 @@ TIME_SYNC,<sequence>,<jetson_send_ns>
 SET_RTC,<unix_seconds>
 ```
 
-`TIME_SYNC` is read-only and may be used during a session to estimate clock
-offset and drift. `SET_RTC` is accepted only while the session and feeder are
-stopped. If the DS3231 reports lost power or an implausible date, `START` is
-rejected with `NACK,START,RTC_INVALID` until the RTC is set. Event time remains
-based on the RP2040 monotonic clock throughout a running session.
+Both commands are pre-run operations and are rejected with `DEVICE_BUSY` while
+the session or feeder is active. `TIME_SYNC` is read-only, but it is still kept
+out of active experiments to avoid adding serial traffic during behavioral
+acquisition. If the DS3231 reports lost power or an implausible date, `START`
+is rejected with `NACK,START,RTC_INVALID` until the RTC is set. Event time
+remains based on the RP2040 monotonic clock throughout a running session.
 
 After the feeder exhausts its retry limit, it emits `FEED_JAM` and rejects new
 feed requests with `NACK,FEED,JAMMED`. After physically clearing the mechanism,
@@ -145,6 +151,28 @@ The Jetson utility records synchronization samples and estimates clock drift:
 uv sync --locked
 uv run mousehouse-clock-sync /dev/ttyACM0 --interval 30
 ```
+
+Before a deployment, the lightweight validation gate confirms that the Jetson
+reports NTP synchronization and that the idle controller clock is within 1.5
+seconds of Jetson UTC. It uses the three lowest-latency exchanges from a
+seven-sample burst and saves a machine-readable JSON record beneath
+`~/MouseHouseClockValidationLogs`:
+
+```sh
+uv run mousehouse-clock-validate /dev/ttyACM0
+```
+
+That command is read-only. If it reports `CLOCK_CORRECTION_REQUIRED`, rerun it
+with explicit permission to set and recheck the RTC:
+
+```sh
+uv run mousehouse-clock-validate /dev/ttyACM0 --correct
+```
+
+The gate exits successfully only after validation passes. Firmware rejects
+both clock-measurement and clock-setting commands while a session or feeder is
+active. Close the PlatformIO monitor and any other serial client before using
+the gate.
 
 The development Python version is recorded in `.python-version`; the utility
 supports Python 3.10 and newer. Commit `uv.lock` when dependencies change. The

@@ -26,11 +26,10 @@ def wait_for(port: Any, prefix: str, timeout: float = 3.0) -> tuple[str, int]:
     raise TimeoutError(f"No {prefix} response")
 
 
-def collect(port: Any, sequence: int) -> dict[str, int | float | str]:
-    """Collect one round-trip clock synchronization sample."""
-    sent_ns = time.time_ns()
-    port.write(f"TIME_SYNC,{sequence},{sent_ns}\n".encode())
-    line, received_ns = wait_for(port, "CLOCK_SYNC,")
+def parse_clock_response(
+    line: str, sequence: int, sent_ns: int, received_ns: int
+) -> dict[str, int | float | str]:
+    """Parse one matching controller response into a clock sample."""
     fields = line.split(",")
     if len(fields) != 7 or int(fields[1]) != sequence or int(fields[2]) != sent_ns:
         raise ValueError(f"Malformed or mismatched response: {line}")
@@ -47,6 +46,14 @@ def collect(port: Any, sequence: int) -> dict[str, int | float | str]:
         "controller_unix_us": int(fields[5]),
         "rtc_status": fields[6],
     }
+
+
+def collect(port: Any, sequence: int) -> dict[str, int | float | str]:
+    """Collect one round-trip clock synchronization sample."""
+    sent_ns = time.time_ns()
+    port.write(f"TIME_SYNC,{sequence},{sent_ns}\n".encode())
+    line, received_ns = wait_for(port, "CLOCK_SYNC,")
+    return parse_clock_response(line, sequence, sent_ns, received_ns)
 
 
 def fit(samples: Sequence[dict[str, Any]]) -> tuple[float, float, float] | None:

@@ -9,3 +9,4 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 mousehouse_clock_sync*.csv
+mousehouse_clock_validation*.json

@@ -32,6 +32,13 @@ enum ActivePoke {
 };
 constexpr ActivePoke ACTIVE_POKE = LEFT;
 
+// Match the reversed room light cycle. The house light is on from 7:33 PM
+// through 7:32:59 AM, and off from 7:33 AM through 7:32:59 PM.
+constexpr uint8_t HOUSE_LIGHT_ON_HOUR = 19;
+constexpr uint8_t HOUSE_LIGHT_ON_MINUTE = 33;
+constexpr uint8_t HOUSE_LIGHT_OFF_HOUR = 7;
+constexpr uint8_t HOUSE_LIGHT_OFF_MINUTE = 33;
+
 // Counts completed active pokes toward the next reward.
 uint8_t activePokesTowardReward = 0;
 
@@ -41,6 +48,9 @@ bool ignoreCurrentActivePoke = false;
 
 void setup() {
   mh.begin();
+  mh.setHouseLightSchedule(HOUSE_LIGHT_ON_HOUR, HOUSE_LIGHT_ON_MINUTE,
+                           HOUSE_LIGHT_OFF_HOUR, HOUSE_LIGHT_OFF_MINUTE,
+                           MouseHouse::HOUSE_LIGHT_US_EASTERN);
   if (PELLET_MODE == LATCHED_PRESENCE) {
     mh.setPelletSensorMode(MouseHouse::PELLET_SENSOR_LATCHED_PRESENCE);
   } else {

@@ -24,6 +24,17 @@ class QualificationProtocolTests(unittest.TestCase):
         for action in ACTION_TEXT:
             self.assertIn(f'Serial.println("{action}")', firmware)
 
+    def test_setup_requires_host_clock_verification(self):
+        firmware = (
+            Path(__file__).resolve().parents[1]
+            / "examples"
+            / "setup_debug"
+            / "setup_debug.ino"
+        ).read_text(encoding="utf-8")
+        self.assertIn('strcmp(command, "TEST,RTC_VERIFIED")', firmware)
+        self.assertIn('setStage(STAGE_RTC);', firmware)
+        self.assertNotIn('mh.rtcValid() ? STAGE_LEFT_POKE : STAGE_RTC', firmware)
+
     def test_protocol_handshake_is_recorded(self):
         state = QualificationState()
         event = state.apply_line(
