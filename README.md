@@ -16,6 +16,19 @@ pio run --target upload
 pio device monitor
 ```
 
+Its active poke alternates at America/New_York midnight using the validated
+DS3231 calendar. The reference date and starting side are configured near the
+top of `examples/fixed_ratio/fixed_ratio.ino`; September 15, 2026 is currently
+a left-poke day, followed by a right-poke day. The selection is deterministic
+across resets. A midnight change waits for any active poke or feed to finish,
+and emits `ACTIVE_POKE_SWITCH_PENDING`. If the old side has partial ratio
+progress, or its poke is active at midnight, that side remains active until the
+animal completes the ratio and its reward feed succeeds. The firmware then
+applies the new side and emits `ACTIVE_POKE_SCHEDULE`. With no ratio in
+progress, the handoff occurs as soon as the poke sensors and feeder are idle.
+Stopping a session abandons partial task progress, as it does at other times,
+and permits the pending calendar side to be applied.
+
 The other included tasks can be built or uploaded by selecting their
 environment:
 

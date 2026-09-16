@@ -43,6 +43,7 @@ public:
   uint64_t timestampUs() const;
   bool rtcValid() const;
   uint64_t rtcAnchorUncertaintyUs() const;
+  uint32_t currentDayNumber(HouseLightTimeBasis timeBasis) const;
   void setHouseLightSchedule(uint8_t onHour, uint8_t onMinute,
                              uint8_t offHour, uint8_t offMinute,
                              HouseLightTimeBasis timeBasis = HOUSE_LIGHT_RTC_TIME);
@@ -160,6 +161,7 @@ private:
 
   uint64_t baseUs_ = 0;
   uint64_t baseUnixUs_ = 0;
+  uint32_t latestRtcUnixSeconds_ = 0;
   uint64_t frameCounter_ = 0;
   uint64_t framePeriodUs_ = 0;
   PIO cameraPio_ = nullptr;
@@ -337,7 +339,8 @@ private:
   void updateTimeout();
   void houseLightOn();
   void houseLightOff();
-  DateTime houseLightScheduleTime(const DateTime& rtcTime) const;
+  DateTime timeForBasis(const DateTime& rtcTime,
+                        HouseLightTimeBasis timeBasis) const;
   void updateHouseLight();
 
   bool initializeCameraPio();

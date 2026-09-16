@@ -78,6 +78,14 @@ void MouseHouse::setHouseLightSchedule(uint8_t onHour, uint8_t onMinute,
   lastHouseLightCheck_ = millis() - kHouseLightCheckIntervalMs;
 }
 
+uint32_t MouseHouse::currentDayNumber(HouseLightTimeBasis timeBasis) const {
+  uint32_t utcSeconds = latestRtcUnixSeconds_;
+  if (utcSeconds == 0) {
+    utcSeconds = (uint32_t)(getTimestampUs() / 1000000ULL);
+  }
+  return timeForBasis(DateTime(utcSeconds), timeBasis).unixtime() / 86400UL;
+}
+
 void MouseHouse::robustShow() {
   strip_.begin();
   strip_.show();
@@ -1260,8 +1268,9 @@ void MouseHouse::houseLightOff() {
   }
 }
 
-DateTime MouseHouse::houseLightScheduleTime(const DateTime& rtcTime) const {
-  if (houseLightTimeBasis_ != HOUSE_LIGHT_US_EASTERN) return rtcTime;
+DateTime MouseHouse::timeForBasis(const DateTime& rtcTime,
+                                  HouseLightTimeBasis timeBasis) const {
+  if (timeBasis != HOUSE_LIGHT_US_EASTERN) return rtcTime;
 
   int year = rtcTime.year();
   uint8_t marchFirstWeekday = DateTime(year, 3, 1).dayOfTheWeek();
@@ -1286,7 +1295,9 @@ void MouseHouse::updateHouseLight() {
   lastHouseLightCheck_ = nowMs;
   if (!rtcValid_) return;
 
-  DateTime now = houseLightScheduleTime(rtc_.now());
+  DateTime rtcNow = rtc_.now();
+  latestRtcUnixSeconds_ = rtcNow.unixtime();
+  DateTime now = timeForBasis(rtcNow, houseLightTimeBasis_);
   uint16_t minuteOfDay = ((uint16_t)now.hour() * 60U) + now.minute();
   bool shouldBeOn = false;
 
@@ -1444,6 +1455,7 @@ void MouseHouse::begin() {
   baseUnixUs_ = 0;
   rtcAnchorUncertaintyUs_ = 0;
   DateTime rtcNow = rtc_.now();
+  latestRtcUnixSeconds_ = rtcNow.unixtime();
   bool rtcDatePlausible = rtcNow.year() >= 2020 && rtcNow.year() <= 2099;
   rtcValid_ = !rtcLostPower && rtcDatePlausible && establishRtcAnchor();
 
