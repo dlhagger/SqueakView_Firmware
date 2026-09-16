@@ -17,7 +17,7 @@ pio device monitor
 ```
 
 Its active poke alternates at America/New_York midnight using the validated
-DS3231 calendar. The reference date and starting side are configured near the
+PCF8523 calendar. The reference date and starting side are configured near the
 top of `examples/fixed_ratio/fixed_ratio.ino`; September 15, 2026 is currently
 a left-poke day, followed by a right-poke day. The selection is deterministic
 across resets. A midnight change waits for any active poke or feed to finish,
@@ -149,7 +149,7 @@ SET_RTC,<unix_seconds>
 Both commands are pre-run operations and are rejected with `DEVICE_BUSY` while
 the session or feeder is active. `TIME_SYNC` is read-only, but it is still kept
 out of active experiments to avoid adding serial traffic during behavioral
-acquisition. If the DS3231 reports lost power or an implausible date, `START`
+acquisition. If the PCF8523 reports lost power or an implausible date, `START`
 is rejected with `NACK,START,RTC_INVALID` until the RTC is set. Event time
 remains based on the RP2040 monotonic clock throughout a running session.
 
@@ -203,7 +203,7 @@ Use `--set-rtc` only while the controller is stopped and reports `RTC_INVALID`.
 ## Startup and hardware failures
 
 Startup intentionally waits for a USB serial connection before initializing the
-rig. A missing DS3231 RTC or MPR121 sensor then prints `ERROR_NO_RTC` or
+rig. A missing PCF8523 RTC or MPR121 sensor then prints `ERROR_NO_RTC` or
 `ERROR_NO_MPR121` and halts in a safe state. An RTC with lost power or an
 implausible date leaves the controller responsive to serial commands, but
 `START` returns `NACK,START,RTC_INVALID` until `SET_RTC` succeeds.

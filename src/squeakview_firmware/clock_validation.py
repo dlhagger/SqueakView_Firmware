@@ -106,7 +106,7 @@ def collect_burst(
 
 
 def set_rtc_from_host(port: Any) -> str:
-    # The DS3231 stores whole seconds. Rounding limits the initial quantization
+    # The PCF8523 stores whole seconds. Rounding limits the initial quantization
     # error to roughly half a second before serial and I2C latency.
     epoch_seconds = int(time.time() + 0.5)
     port.write(f"SET_RTC,{epoch_seconds}\n".encode())

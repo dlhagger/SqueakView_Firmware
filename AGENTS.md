@@ -90,11 +90,13 @@ change and confirms it against the rig.
   when the PIO source changes.
 - Event time during a session is anchored to the RP2040 monotonic clock. Do not
   replace it with repeated live RTC reads.
+- The rig uses the PCF8523 as its sole RTC. A DS3231 must not be connected to
+  the same I2C bus because both devices use the fixed address `0x68`.
 - `TIME_SYNC` and `SET_RTC` are pre-run operations. Both must remain rejected
   while a session or feeder is active so experiments receive no synchronization
   traffic and their clock anchor cannot change mid-run.
-- Missing RTC or MPR121 hardware intentionally leaves the controller in a safe
-  halted or command-responsive state as documented in `README.md`.
+- Missing PCF8523 RTC or MPR121 hardware intentionally leaves the controller in
+  a safe halted or command-responsive state as documented in `README.md`.
 - An invalid RTC intentionally blocks `START` until `SET_RTC` succeeds.
 
 ## Required process for hardware-facing changes

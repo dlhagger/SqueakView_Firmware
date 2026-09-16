@@ -150,7 +150,7 @@ private:
   static constexpr long kNotApplicable = 69420;
   static constexpr const char* kNanString = "nan";
 
-  RTC_DS3231 rtc_;
+  RTC_PCF8523 rtc_;
   Adafruit_MPR121 cap_;
   Adafruit_NeoPixel strip_;
   Stepper stepper_;
