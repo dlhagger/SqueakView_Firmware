@@ -1,10 +1,13 @@
 #include <Arduino.h>
 #include "MouseHouse.h"
+#include "TaskSerialProxy.h"
 
 // TASK_INFO,unix_us,rp2040_us,nan,phase,hold_us,go_us,go_prob,context,reason
 // NOGO_STAGE_INFO,unix_us,rp2040_us,nan,nogoStage,nogo_us,eval_goal,go_prob,context,reason
 
 MouseHouse mh;
+TaskSerialProxy taskSerial(&mh);
+#define Serial taskSerial
 
 // Phase timing + reward
 const uint32_t GO_TONE_FREQ = 5000;
@@ -130,25 +133,8 @@ void logEvent(const char* eventType,
               long value,
               const char* context,
               const char* reason) {
-  Serial.print(eventType);
-  Serial.print(",");
-  Serial.print(unixTime);
-  Serial.print(",");
-  Serial.print(rp2040Time);
-  Serial.print(",");
-  Serial.print(side);
-  Serial.print(",");
-  Serial.print(count);
-  Serial.print(",");
-  Serial.print(duration);
-  Serial.print(",");
-  Serial.print(latency);
-  Serial.print(",");
-  Serial.print(value);
-  Serial.print(",");
-  Serial.print(context);
-  Serial.print(",");
-  Serial.println(reason);
+  mh.logEvent(eventType, unixTime, rp2040Time, side, count, duration,
+              latency, value, context, reason);
 }
 
 void syncLibraryTaskContext() {

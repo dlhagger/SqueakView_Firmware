@@ -153,6 +153,17 @@ acquisition. If the PCF8523 reports lost power or an implausible date, `START`
 is rejected with `NACK,START,RTC_INVALID` until the RTC is set. Event time
 remains based on the RP2040 monotonic clock throughout a running session.
 
+### Reliable serial protocol v2
+
+The controller boots with the existing CSV protocol for deployed-host
+compatibility. A stopped host may send `PROTO,2` to activate reliable COBS +
+CRC32 framing after the exact legacy `ACK_PROTO,2` response has completely
+left the controller. Protocol v2 retains records in a fixed RAM queue until the
+host acknowledges durable storage, supports explicit replay, and replaces
+per-edge camera messages with epoch/checkpoint/stop summaries. See
+[PROTOCOL_V2.md](PROTOCOL_V2.md) for the byte layout, host requirements, failure
+behavior, and hardware qualification plan.
+
 After the feeder exhausts its retry limit, it emits `FEED_JAM` and rejects new
 feed requests with `NACK,FEED,JAMMED`. After physically clearing the mechanism,
 send `CLEAR_JAM`; the controller responds with `ACK_CLEAR_JAM` and permits the
@@ -202,9 +213,10 @@ Use `--set-rtc` only while the controller is stopped and reports `RTC_INVALID`.
 
 ## Startup and hardware failures
 
-Startup intentionally waits for a USB serial connection before initializing the
-rig. A missing PCF8523 RTC or MPR121 sensor then prints `ERROR_NO_RTC` or
-`ERROR_NO_MPR121` and halts in a safe state. An RTC with lost power or an
+Startup no longer waits for a USB serial connection; transport output remains
+queued and the rig can stay safe when the host is absent. A missing PCF8523 RTC
+or MPR121 sensor queues `ERROR_NO_RTC` or `ERROR_NO_MPR121` and remains in a
+safe halted state while servicing only the queued error output. An RTC with lost power or an
 implausible date leaves the controller responsive to serial commands, but
 `START` returns `NACK,START,RTC_INVALID` until `SET_RTC` succeeds.
 

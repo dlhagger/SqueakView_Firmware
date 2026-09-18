@@ -1,6 +1,9 @@
 #include <MouseHouse.h>
+#include <TaskSerialProxy.h>
 
 MouseHouse mh;
+TaskSerialProxy taskSerial(&mh);
+#define Serial taskSerial
 
 // ----------------------
 // Task configuration

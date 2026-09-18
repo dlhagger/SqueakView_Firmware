@@ -3,10 +3,14 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <hardware/clocks.h>
 #include <hardware/irq.h>
+#include <hardware/sync.h>
+#include <pico/rand.h>
 
 #ifndef MPR121_TOUCHTH_0
 #define MPR121_TOUCHTH_0 0x41
@@ -52,16 +56,14 @@ bool MouseHouse::establishRtcAnchor() {
 }
 
 void MouseHouse::logClockStatus(const char* reason) {
-  Serial.print("CLOCK_STATUS,");
-  Serial.print(rtcValid_ ? "VALID" : "INVALID");
-  Serial.print(",");
-  Serial.print(baseUnixUs_);
-  Serial.print(",");
-  Serial.print(baseUs_);
-  Serial.print(",");
-  Serial.print(rtcAnchorUncertaintyUs_);
-  Serial.print(",");
-  Serial.println(reason ? reason : kNanString);
+  queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+            SerialTransport::PRIORITY_DIAGNOSTIC,
+            "CLOCK_STATUS,%s,%llu,%llu,%llu,%s",
+            rtcValid_ ? "VALID" : "INVALID",
+            (unsigned long long)baseUnixUs_,
+            (unsigned long long)baseUs_,
+            (unsigned long long)rtcAnchorUncertaintyUs_,
+            reason ? reason : kNanString);
 }
 
 void MouseHouse::setHouseLightSchedule(uint8_t onHour, uint8_t onMinute,
@@ -101,25 +103,62 @@ void MouseHouse::logEvent(const char* eventType,
                           long value,
                           const char* context,
                           const char* reason) {
-  Serial.print(eventType);
-  Serial.print(",");
-  Serial.print(unixTime);
-  Serial.print(",");
-  Serial.print(rp2040Time);
-  Serial.print(",");
-  Serial.print(side);
-  Serial.print(",");
-  Serial.print(count);
-  Serial.print(",");
-  Serial.print(duration);
-  Serial.print(",");
-  Serial.print(latency);
-  Serial.print(",");
-  Serial.print(value);
-  Serial.print(",");
-  Serial.print(context);
-  Serial.print(",");
-  Serial.println(reason);
+  SerialTransport::EventFields event{};
+  strncpy(event.eventType, eventType ? eventType : kNanString,
+          sizeof(event.eventType) - 1U);
+  event.unixTime = unixTime;
+  event.rp2040Time = rp2040Time;
+  strncpy(event.side, side ? side : kNanString, sizeof(event.side) - 1U);
+  event.count = count;
+  event.duration = duration;
+  event.latency = latency;
+  event.value = value;
+  strncpy(event.context, context ? context : kNanString,
+          sizeof(event.context) - 1U);
+  strncpy(event.reason, reason ? reason : kNanString,
+          sizeof(event.reason) - 1U);
+
+  SerialTransport::Priority priority = SerialTransport::PRIORITY_EVENT;
+  if (strcmp(event.eventType, "FEED_JAM") == 0
+      || strcmp(event.eventType, "ACK_STOP") == 0) {
+    priority = SerialTransport::PRIORITY_SAFETY;
+  }
+  uint32_t recordSession = (running_ || strcmp(event.eventType, "ACK_STOP") == 0)
+                               ? sessionId_ : 0U;
+  if (!transport_.enqueueEvent(event, priority, recordSession)) {
+    noteRequiredRecordFailure(event.eventType, rp2040Time);
+  }
+}
+
+bool MouseHouse::emitLegacyLine(const char* line) {
+  if (transport_.enqueueText(line, MouseHouseProtocolV2::MESSAGE_EVENT,
+                             SerialTransport::PRIORITY_EVENT,
+                             running_ ? sessionId_ : 0U,
+                             time_us_64())) {
+    return true;
+  }
+  noteRequiredRecordFailure("TASK_EVENT", time_us_64());
+  return false;
+}
+
+bool MouseHouse::queueText(uint8_t messageType,
+                           SerialTransport::Priority priority,
+                           const char* format, ...) {
+  char line[SerialTransport::kLegacyLineSize];
+  va_list args;
+  va_start(args, format);
+  int length = vsnprintf(line, sizeof(line), format, args);
+  va_end(args);
+  if (length < 0 || (size_t)length >= sizeof(line)) return false;
+  return transport_.enqueueText(line, messageType, priority,
+                                running_ ? sessionId_ : 0U,
+                                time_us_64());
+}
+
+void MouseHouse::noteRequiredRecordFailure(const char* type,
+                                            uint64_t timestampUs) {
+  transport_.latchOverflow(type, timestampUs);
+  integrityFailSafePending_ = true;
 }
 
 const char* MouseHouse::getContext() const {
@@ -173,10 +212,12 @@ void MouseHouse::resetSerialCommandBuffer() {
 }
 
 void MouseHouse::sendCommandError(const char* command, const char* reason) {
-  Serial.print("NACK,");
-  Serial.print(command ? command : "UNKNOWN");
-  Serial.print(",");
-  Serial.println(reason ? reason : "INVALID");
+  if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                 SerialTransport::PRIORITY_SAFETY, "NACK,%s,%s",
+                 command ? command : "UNKNOWN",
+                 reason ? reason : "INVALID")) {
+    noteRequiredRecordFailure("COMMAND_RESULT", time_us_64());
+  }
 }
 
 bool MouseHouse::parseLongStrict(const char* text,
@@ -230,18 +271,17 @@ void MouseHouse::handleTimeSyncCommand(const char* arguments, uint64_t receivedU
 
   uint64_t transmitUs = time_us_64();
   uint64_t controllerUnixUs = baseUnixUs_ + (transmitUs - baseUs_);
-  Serial.print("CLOCK_SYNC,");
-  Serial.print(sequence);
-  Serial.print(",");
-  Serial.print(jetsonSendNs);
-  Serial.print(",");
-  Serial.print(receivedUs);
-  Serial.print(",");
-  Serial.print(transmitUs);
-  Serial.print(",");
-  Serial.print(controllerUnixUs);
-  Serial.print(",");
-  Serial.println(rtcValid_ ? "RTC_VALID" : "RTC_INVALID");
+  if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                 SerialTransport::PRIORITY_SAFETY,
+                 "CLOCK_SYNC,%llu,%llu,%llu,%llu,%llu,%s",
+                 (unsigned long long)sequence,
+                 (unsigned long long)jetsonSendNs,
+                 (unsigned long long)receivedUs,
+                 (unsigned long long)transmitUs,
+                 (unsigned long long)controllerUnixUs,
+                 rtcValid_ ? "RTC_VALID" : "RTC_INVALID")) {
+    noteRequiredRecordFailure("CLOCK_SYNC", transmitUs);
+  }
 }
 
 void MouseHouse::handleSetRtcCommand(const char* arguments) {
@@ -263,21 +303,127 @@ void MouseHouse::handleSetRtcCommand(const char* arguments) {
     return;
   }
 
-  Serial.print("ACK_SET_RTC,");
-  Serial.print(epochSeconds);
-  Serial.print(",");
-  Serial.print(baseUs_);
-  Serial.print(",");
-  Serial.println(rtcAnchorUncertaintyUs_);
+  if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                 SerialTransport::PRIORITY_SAFETY,
+                 "ACK_SET_RTC,%llu,%llu,%llu",
+                 (unsigned long long)epochSeconds,
+                 (unsigned long long)baseUs_,
+                 (unsigned long long)rtcAnchorUncertaintyUs_)) {
+    noteRequiredRecordFailure("ACK_SET_RTC", time_us_64());
+  }
   logClockStatus("JetsonSet");
+}
+
+void MouseHouse::queueTransportStatus() {
+  SerialTransport::Diagnostics d = transport_.diagnostics();
+  if (!queueText(MouseHouseProtocolV2::MESSAGE_TRANSPORT_STATUS,
+                 SerialTransport::PRIORITY_SAFETY,
+                 "TRANSPORT_STATUS,b=%llu,m=%u,n=%u,q=%u/%u,h=%u,o=%llu,a=%llu,"
+                 "t=%llu,k=%llu,x=%u,l=%s,u=%llu,c=%lu,p=%lu,z=%lu,r=%lu,"
+                 "v=%lu,f=%lu,d=%lu",
+                 (unsigned long long)transport_.bootId(),
+                 (unsigned)transport_.mode(), d.connected ? 1U : 0U,
+                 d.queueUsed, d.queueCapacity,
+                 d.queueHighWater, (unsigned long long)d.oldestSequence,
+                 (unsigned long long)d.highestAssignedSequence,
+                 (unsigned long long)d.highestTransmittedSequence,
+                 (unsigned long long)d.highestAcknowledgedSequence,
+                 d.overflowLatched ? 1U : 0U, d.firstLostType,
+                 (unsigned long long)d.firstLostTimestampUs,
+                 (unsigned long)d.suppressedCheckpoints,
+                 (unsigned long)d.partialWrites,
+                 (unsigned long)d.zeroCapacityServices,
+                 (unsigned long)d.retransmissions,
+                 (unsigned long)d.commandBufferOverflows,
+                 (unsigned long)d.malformedCommands,
+                 (unsigned long)d.maxServiceDurationUs)) {
+    noteRequiredRecordFailure("TRANSPORT_STATUS", time_us_64());
+  }
 }
 
 void MouseHouse::handleSerialCommand(const char* cmd) {
   uint64_t receivedUs = time_us_64();
-  if (strncmp(cmd, "START,", 6) == 0) {
+  if (strcmp(cmd, "PROTO,2") == 0) {
+    if (running_ || feedActive_) {
+      sendCommandError("PROTO", "DEVICE_BUSY");
+    } else if (transport_.mode() == SerialTransport::PROTOCOL_V2_ACTIVE) {
+      if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                     SerialTransport::PRIORITY_SAFETY, "ACK_PROTO,2")) {
+        noteRequiredRecordFailure("ACK_PROTO", receivedUs);
+      }
+    } else if (!transport_.requestProtocolV2()) {
+      noteRequiredRecordFailure("ACK_PROTO", receivedUs);
+    }
+  } else if (strncmp(cmd, "PROTO,", 6) == 0) {
+    sendCommandError("PROTO", "UNSUPPORTED_VERSION");
+  } else if (strncmp(cmd, "ACK_EVENTS,", 11) == 0) {
+    char copy[kSerialCmdBufferSize];
+    strncpy(copy, cmd + 11, sizeof(copy) - 1U);
+    copy[sizeof(copy) - 1U] = '\0';
+    char* separator = strchr(copy, ',');
+    uint64_t boot = 0;
+    uint64_t sequence = 0;
+    if (separator == nullptr) {
+      transport_.noteMalformedCommand();
+      sendCommandError("ACK_EVENTS", "EXPECTED_BOOT_AND_SEQUENCE");
+    } else {
+      *separator = '\0';
+      if (!parseUint64Strict(copy, 0, UINT64_MAX, boot)
+          || !parseUint64Strict(separator + 1, 0, UINT64_MAX, sequence)) {
+        transport_.noteMalformedCommand();
+        sendCommandError("ACK_EVENTS", "INVALID_ARGUMENT");
+      } else if (!transport_.acknowledge(boot, sequence)) {
+        sendCommandError("ACK_EVENTS", "WRONG_BOOT_OR_NOT_EMITTED");
+      }
+    }
+  } else if (strncmp(cmd, "RESEND_EVENTS,", 14) == 0) {
+    char copy[kSerialCmdBufferSize];
+    strncpy(copy, cmd + 14, sizeof(copy) - 1U);
+    copy[sizeof(copy) - 1U] = '\0';
+    char* separator = strchr(copy, ',');
+    uint64_t boot = 0;
+    uint64_t sequence = 0;
+    if (separator == nullptr) {
+      transport_.noteMalformedCommand();
+      sendCommandError("RESEND_EVENTS", "EXPECTED_BOOT_AND_SEQUENCE");
+    } else {
+      *separator = '\0';
+      if (!parseUint64Strict(copy, 0, UINT64_MAX, boot)
+          || !parseUint64Strict(separator + 1, 1, UINT64_MAX, sequence)) {
+        transport_.noteMalformedCommand();
+        sendCommandError("RESEND_EVENTS", "INVALID_ARGUMENT");
+      } else {
+        SerialTransport::ResendResult result = transport_.requestResend(boot, sequence);
+        if (result == SerialTransport::RESEND_ACCEPTED) {
+          if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                         SerialTransport::PRIORITY_SAFETY,
+                         "ACK_RESEND_EVENTS,%llu,%llu",
+                         (unsigned long long)boot,
+                         (unsigned long long)sequence)) {
+            noteRequiredRecordFailure("ACK_RESEND_EVENTS", receivedUs);
+          }
+        } else if (result == SerialTransport::RESEND_WRONG_BOOT) {
+          sendCommandError("RESEND_EVENTS", "WRONG_BOOT");
+        } else if (result == SerialTransport::RESEND_NOT_EMITTED) {
+          sendCommandError("RESEND_EVENTS", "NOT_EMITTED");
+        } else {
+          if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                         SerialTransport::PRIORITY_SAFETY,
+                         "NACK,RESEND_EVENTS,TOO_OLD,oldest=%llu",
+                         (unsigned long long)transport_.oldestRetainedSequence())) {
+            noteRequiredRecordFailure("NACK_RESEND_EVENTS", receivedUs);
+          }
+        }
+      }
+    }
+  } else if (strcmp(cmd, "TRANSPORT_STATUS") == 0) {
+    queueTransportStatus();
+  } else if (strncmp(cmd, "START,", 6) == 0) {
     long fps = 0;
     if (!parseLongStrict(cmd + 6, 1, 120, fps)) {
       sendCommandError("START", "INVALID_FPS");
+    } else if (transport_.overflowLatched()) {
+      sendCommandError("START", "INTEGRITY_LATCHED");
     } else if (!rtcValid_) {
       sendCommandError("START", "RTC_INVALID");
     } else if (!cameraPioReady_) {
@@ -293,13 +439,20 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
     long steps = 0;
     if (!parseLongStrict(cmd + 5, 1, kMaxFeedCommandSteps, steps)) {
       sendCommandError("FEED", "INVALID_STEPS");
+    } else if (transport_.overflowLatched()) {
+      sendCommandError("FEED", "INTEGRITY_LATCHED");
     } else if (feedJammed_) {
       sendCommandError("FEED", "JAMMED");
     } else if (feedActive_) {
       sendCommandError("FEED", "ALREADY_ACTIVE");
     } else {
       feed((int)steps);
-      if (!compatibilitySerialMode_) Serial.println("ACK_FEED");
+      if (!compatibilitySerialMode_) {
+        if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                       SerialTransport::PRIORITY_SAFETY, "ACK_FEED")) {
+          noteRequiredRecordFailure("ACK_FEED", receivedUs);
+        }
+      }
     }
   } else if (strcmp(cmd, "CLEAR_JAM") == 0) {
     if (feedActive_) {
@@ -308,7 +461,10 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
       sendCommandError("CLEAR_JAM", "NOT_JAMMED");
     } else {
       clearFeedJam();
-      Serial.println("ACK_CLEAR_JAM");
+      if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                     SerialTransport::PRIORITY_SAFETY, "ACK_CLEAR_JAM")) {
+        noteRequiredRecordFailure("ACK_CLEAR_JAM", receivedUs);
+      }
     }
   } else if (strncmp(cmd, "TIME_SYNC,", 10) == 0) {
     if (running_ || feedActive_) {
@@ -326,17 +482,24 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
 }
 
 void MouseHouse::checkSerialCommands() {
-  while (Serial.available() > 0) {
+  uint8_t bytesRead = 0;
+  uint8_t commandsDispatched = 0;
+  while (Serial.available() > 0
+         && bytesRead < SerialTransport::kInputByteBudget
+         && commandsDispatched < SerialTransport::kCommandDispatchBudget) {
     char ch = (char)Serial.read();
+    bytesRead++;
 
     if (ch == '\r') continue;
 
     if (ch == '\n') {
       if (serialCmdOverflow_) {
+        transport_.noteCommandBufferOverflow();
         sendCommandError("UNKNOWN", "COMMAND_TOO_LONG");
       } else if (serialCmdLength_ > 0) {
         serialCmdBuffer_[serialCmdLength_] = '\0';
         handleSerialCommand(serialCmdBuffer_);
+        commandsDispatched++;
       }
       resetSerialCommandBuffer();
       continue;
@@ -363,15 +526,15 @@ void MouseHouse::setDebounce(uint8_t dt, uint8_t dr) {
 
 void MouseHouse::dumpRegs() {
   uint8_t db = cap_.readRegister8(MPR121_DEBOUNCE);
-  Serial.print("Debounce DT=");
-  Serial.print(db & 0x07);
-  Serial.print(" DR=");
-  Serial.println((db >> 4) & 0x07);
-
-  Serial.print("TTH/RTH electrode 1 = ");
-  Serial.print(cap_.readRegister8(MPR121_TOUCHTH_0 + 2));
-  Serial.print("/");
-  Serial.println(cap_.readRegister8(MPR121_RELEASETH_0 + 2));
+  queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+            SerialTransport::PRIORITY_DIAGNOSTIC,
+            "Debounce DT=%u DR=%u", (unsigned)(db & 0x07),
+            (unsigned)((db >> 4) & 0x07));
+  queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+            SerialTransport::PRIORITY_DIAGNOSTIC,
+            "TTH/RTH electrode 1 = %u/%u",
+            (unsigned)cap_.readRegister8(MPR121_TOUCHTH_0 + 2),
+            (unsigned)cap_.readRegister8(MPR121_RELEASETH_0 + 2));
 }
 
 void MouseHouse::configureMPR121() {
@@ -388,19 +551,19 @@ void MouseHouse::configureMPR121Silent() {
 }
 
 void MouseHouse::resetMPR121() {
-  Serial.println("MPR121_RESET_BEGIN");
+  emitLegacyLine("MPR121_RESET_BEGIN");
   cap_.writeRegister(0x80, 0x63);
   delay(1);
   delay(2);
 
   if (!cap_.begin(0x5A)) {
-    Serial.println("MPR121_RESET_FAIL: begin()");
+    emitLegacyLine("MPR121_RESET_FAIL: begin()");
     return;
   }
 
   configureMPR121();
   dumpRegs();
-  Serial.println("MPR121_RESET_OK");
+  emitLegacyLine("MPR121_RESET_OK");
 }
 
 bool MouseHouse::mpr121Faulted() {
@@ -418,7 +581,7 @@ void MouseHouse::checkMPR121Health() {
     lastMpr121Check_ = nowMs;
 
     if (mpr121Faulted()) {
-      Serial.println("MPR121_FAULT_DETECTED");
+      emitLegacyLine("MPR121_FAULT_DETECTED");
       resetMPR121();
     }
   }
@@ -798,7 +961,8 @@ void MouseHouse::feedStop(const char* reason) {
 void MouseHouse::feed(int steps) {
   uint64_t nowUs = time_us_64();
 
-  if (steps > 0 && !feedActive_ && !feedJammed_) {
+  if (steps > 0 && !feedActive_ && !feedJammed_
+      && !transport_.overflowLatched()) {
     startFeedRun(steps, nowUs);
   }
 }
@@ -1346,7 +1510,11 @@ void MouseHouse::cameraPioIrqHandler() {
   if (owner == nullptr || owner->cameraPio_ == nullptr) return;
   if (pio_interrupt_get(owner->cameraPio_, 0)) {
     pio_interrupt_clear(owner->cameraPio_, 0);
-    owner->cameraIrqFrameCount_++;
+    uint64_t irqUs = time_us_64();
+    uint32_t nextCount = owner->cameraIrqFrameCount_ + 1U;
+    if (nextCount == 1U) owner->cameraFirstIrqUs_ = irqUs;
+    owner->cameraLastIrqUs_ = irqUs;
+    owner->cameraIrqFrameCount_ = nextCount;
   }
 }
 
@@ -1355,6 +1523,8 @@ void MouseHouse::startCameraPio() {
 
   stopCameraPio();
   cameraIrqFrameCount_ = 0;
+  cameraFirstIrqUs_ = 0;
+  cameraLastIrqUs_ = 0;
   cameraLoggedFrameCount_ = 0;
   frameCounter_ = 0;
 
@@ -1377,6 +1547,15 @@ void MouseHouse::startCameraPio() {
   pio_sm_set_enabled(cameraPio_, (uint)cameraSm_, true);
 }
 
+void MouseHouse::snapshotCameraIrq(uint32_t& count, uint64_t& firstUs,
+                                   uint64_t& lastUs) const {
+  uint32_t interruptState = save_and_disable_interrupts();
+  count = cameraIrqFrameCount_;
+  firstUs = cameraFirstIrqUs_;
+  lastUs = cameraLastIrqUs_;
+  restore_interrupts(interruptState);
+}
+
 void MouseHouse::stopCameraPio() {
   if (!cameraPioReady_) {
     digitalWrite(kPulsePin, LOW);
@@ -1391,11 +1570,41 @@ void MouseHouse::stopCameraPio() {
 void MouseHouse::drainCameraEvents() {
   if (!running_) return;
 
-  uint32_t observedFrames = cameraIrqFrameCount_;
+  uint32_t observedFrames = 0;
+  uint64_t firstIrqUs = 0;
+  uint64_t lastIrqUs = 0;
+  snapshotCameraIrq(observedFrames, firstIrqUs, lastIrqUs);
   frameCounter_ = observedFrames;
+  if (transport_.v2EnabledOrPending()) {
+    if (observedFrames == 0) return;
+    uint64_t latestUs = lastIrqUs;
+    if (!cameraEpochQueued_) {
+      queueCameraRecord(MouseHouseProtocolV2::MESSAGE_CAMERA_EPOCH, "Start",
+                        SerialTransport::PRIORITY_CAMERA_CRITICAL,
+                        1U, firstIrqUs);
+      cameraEpochQueued_ = true;
+      nextCameraCheckpointUs_ = firstIrqUs
+          + kCameraCheckpointIntervalUs;
+    }
+    if (latestUs >= nextCameraCheckpointUs_) {
+      SerialTransport::Diagnostics d = transport_.diagnostics();
+      if (d.queueUsed < SerialTransport::kCheckpointHighWater) {
+        queueCameraRecord(MouseHouseProtocolV2::MESSAGE_CAMERA_CHECKPOINT,
+                          "Periodic",
+                          SerialTransport::PRIORITY_CAMERA_CHECKPOINT,
+                          observedFrames, latestUs);
+      } else {
+        transport_.noteSuppressedCheckpoint();
+      }
+      nextCameraCheckpointUs_ = latestUs + kCameraCheckpointIntervalUs;
+    }
+    cameraLoggedFrameCount_ = observedFrames;
+    return;
+  }
+
   uint32_t emitted = 0;
   while (cameraLoggedFrameCount_ < observedFrames
-         && emitted < kCameraLogsPerUpdate) {
+         && emitted < 8U) {
     uint32_t frame = ++cameraLoggedFrameCount_;
     uint64_t riseUs = cameraFirstFrameUs_ + ((uint64_t)(frame - 1U) * framePeriodUs_);
     uint64_t riseUnix = baseUnixUs_ + (riseUs - baseUs_);
@@ -1412,8 +1621,92 @@ void MouseHouse::drainCameraEvents() {
   }
 }
 
+void MouseHouse::queueCameraRecord(uint8_t messageType, const char* reason,
+                                   SerialTransport::Priority priority,
+                                   uint32_t triggerCount,
+                                   uint64_t triggerTimestampUs) {
+  SerialTransport::Diagnostics d = transport_.diagnostics();
+  SerialTransport::CameraFields camera{};
+  camera.triggerCount = triggerCount;
+  camera.triggerTimestampUs = triggerTimestampUs;
+  camera.framePeriodUs = (uint32_t)framePeriodUs_;
+  camera.pulseWidthUs = (uint32_t)kPulseWidthUs;
+  camera.healthFlags = (cameraPioReady_ ? 0x01UL : 0UL)
+      | (running_ ? 0x02UL : 0UL)
+      | (transport_.overflowLatched() ? 0x04UL : 0UL);
+  camera.suppressedCheckpoints = d.suppressedCheckpoints;
+  camera.queueDepth = d.queueUsed;
+  camera.queueHighWater = d.queueHighWater;
+  strncpy(camera.reason, reason ? reason : kNanString,
+          sizeof(camera.reason) - 1U);
+  if (!transport_.enqueueCamera(messageType, camera, priority, sessionId_,
+                                triggerTimestampUs)) {
+    if (priority == SerialTransport::PRIORITY_CAMERA_CHECKPOINT) {
+      transport_.noteSuppressedCheckpoint();
+    } else {
+      noteRequiredRecordFailure("CAMERA_RECORD", triggerTimestampUs);
+    }
+  }
+}
+
+void MouseHouse::applyIntegrityFailSafe() {
+  if (!integrityFailSafePending_ || integrityFailSafeApplied_) return;
+  integrityFailSafePending_ = false;
+  integrityFailSafeApplied_ = true;
+
+  bool cameraWasRunning = running_;
+  running_ = false;
+  stopCameraPio();
+  uint32_t finalFrames = 0;
+  uint64_t firstFrameUs = 0;
+  uint64_t finalFrameUs = 0;
+  snapshotCameraIrq(finalFrames, firstFrameUs, finalFrameUs);
+  if (finalFrames == 0) finalFrameUs = time_us_64();
+  frameCounter_ = finalFrames;
+
+  if (feedActive_) {
+    feedActive_ = false;
+    disableFeederOutputs();
+    digitalWrite(kMotorEnablePin, LOW);
+  }
+  clearTimeoutState();
+
+  integrityReportPending_ = true;
+  integrityCameraStopPending_ = cameraWasRunning
+      && transport_.v2EnabledOrPending();
+  integrityFinalFrameCount_ = finalFrames;
+  integrityFinalFrameUs_ = finalFrameUs;
+}
+
+void MouseHouse::serviceIntegrityReports() {
+  if (integrityReportPending_) {
+    SerialTransport::Diagnostics d = transport_.diagnostics();
+    if (d.queueUsed < SerialTransport::kQueueCapacity
+        && queueText(MouseHouseProtocolV2::MESSAGE_INTEGRITY_FAULT,
+                     SerialTransport::PRIORITY_SAFETY,
+                     "INTEGRITY_FAULT,QUEUE_OVERFLOW,first_lost=%s,first_lost_us=%llu",
+                     d.firstLostType,
+                     (unsigned long long)d.firstLostTimestampUs)) {
+      integrityReportPending_ = false;
+    }
+  } else if (integrityCameraStopPending_) {
+    SerialTransport::Diagnostics d = transport_.diagnostics();
+    if (d.queueUsed < SerialTransport::kQueueCapacity) {
+      queueCameraRecord(MouseHouseProtocolV2::MESSAGE_CAMERA_STOP,
+                        "IntegrityFailSafe", SerialTransport::PRIORITY_SAFETY,
+                        integrityFinalFrameCount_, integrityFinalFrameUs_);
+      integrityCameraStopPending_ = false;
+    }
+  }
+}
+
 void MouseHouse::updateBackgroundServices() {
   checkSerialCommands();
+  if (transport_.overflowLatched() && !integrityFailSafeApplied_) {
+    integrityFailSafePending_ = true;
+  }
+  applyIntegrityFailSafe();
+  serviceIntegrityReports();
   serviceFeed();
   serviceIndicatorRefresh();
   checkMPR121Health();
@@ -1438,17 +1731,18 @@ bool MouseHouse::consumeFlag(bool& flag) {
 
 void MouseHouse::begin() {
   Serial.begin(115200);
-  while (!Serial) delay(10);
+  transport_.begin(get_rand_64());
 
   if (!rtc_.begin()) {
-    Serial.println("ERROR_NO_RTC");
-    while (1)
-      ;
+    emitLegacyLine("ERROR_NO_RTC");
+    while (1) {
+      transport_.serviceOutput();
+    }
   }
 
   bool rtcLostPower = rtc_.lostPower();
   if (rtcLostPower) {
-    Serial.println("RTC_LOST_POWER");
+    emitLegacyLine("RTC_LOST_POWER");
   }
 
   baseUs_ = time_us_64();
@@ -1477,9 +1771,10 @@ void MouseHouse::begin() {
 
   framePeriodUs_ = 1000000ULL / fps_;
   if (!cap_.begin(0x5A)) {
-    Serial.println("ERROR_NO_MPR121");
-    while (1)
-      ;
+    emitLegacyLine("ERROR_NO_MPR121");
+    while (1) {
+      transport_.serviceOutput();
+    }
   }
 
   configureMPR121();
@@ -1495,29 +1790,34 @@ void MouseHouse::begin() {
   pinMode(kHouseLightPin, OUTPUT);
   digitalWrite(kHouseLightPin, HIGH);
 
-  Serial.print("SYSTEM_START,");
-  Serial.print(getTimestampUs());
-  Serial.print(",");
-  Serial.println(time_us_64());
+  queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+            SerialTransport::PRIORITY_DIAGNOSTIC,
+            "SYSTEM_START,%llu,%llu",
+            (unsigned long long)getTimestampUs(),
+            (unsigned long long)time_us_64());
   if (!compatibilitySerialMode_) {
-    Serial.print("MOUSEHOUSE_BUILD,");
-    Serial.print(__DATE__);
-    Serial.print(",");
-    Serial.println(__TIME__);
+    queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+              SerialTransport::PRIORITY_DIAGNOSTIC,
+              "MOUSEHOUSE_BUILD,%s,%s", __DATE__, __TIME__);
   }
   logClockStatus(rtcLostPower ? "LostPower" :
                  (rtcDatePlausible ? "Boot" : "ImplausibleDate"));
 }
 
 void MouseHouse::startSession(uint32_t fps) {
-  if (fps == 0 || fps > 120 || !rtcValid_ || !cameraPioReady_) return;
+  if (fps == 0 || fps > 120 || !rtcValid_ || !cameraPioReady_
+      || transport_.overflowLatched()) return;
 
   configureMPR121Silent();
   clearTimeoutState();
 
   fps_ = fps;
+  sessionId_++;
+  if (sessionId_ == 0) sessionId_ = 1;
   running_ = true;
   frameCounter_ = 0;
+  cameraEpochQueued_ = false;
+  nextCameraCheckpointUs_ = 0;
   resetSessionEventCounts();
   syncBehavioralStateToSensors(getTimestampUs());
 
@@ -1541,15 +1841,27 @@ void MouseHouse::startSession(uint32_t fps) {
 }
 
 void MouseHouse::stopSession() {
+  bool wasRunning = running_;
   if (feedActive_) {
     feedStop("StopCommand");
     feedRetryCount_ = 0;
   }
 
-  frameCounter_ = cameraIrqFrameCount_;
   running_ = false;
   stopCameraPio();
+  uint32_t finalFrames = 0;
+  uint64_t firstFrameUs = 0;
+  uint64_t lastFrameUs = 0;
+  snapshotCameraIrq(finalFrames, firstFrameUs, lastFrameUs);
+  frameCounter_ = finalFrames;
+  if (finalFrames == 0) lastFrameUs = time_us_64();
   clearTimeoutState();
+
+  if (wasRunning && transport_.v2EnabledOrPending()) {
+    queueCameraRecord(MouseHouseProtocolV2::MESSAGE_CAMERA_STOP,
+                      "StopCommand", SerialTransport::PRIORITY_SAFETY,
+                      (uint32_t)frameCounter_, lastFrameUs);
+  }
 
   if (!compatibilitySerialMode_) {
     uint64_t nowUnix = getTimestampUs();
@@ -1577,6 +1889,8 @@ void MouseHouse::update() {
   if (running_ || sensorPollingWhileStopped_) {
     pollBehavioralSensors();
   }
+
+  transport_.serviceOutput();
 }
 
 bool MouseHouse::isRunning() const {

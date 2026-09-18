@@ -1,8 +1,11 @@
 #include <MouseHouse.h>
+#include <TaskSerialProxy.h>
 #include <ctype.h>
 #include <string.h>
 
 MouseHouse mh;
+TaskSerialProxy taskSerial(&mh);
+#define Serial taskSerial
 
 // Guided, nonblocking pre-deployment qualification. Sensors are verified by
 // firmware; LEDs, motor motion, camera TTL, buzzer, and house light require an

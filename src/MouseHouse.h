@@ -8,6 +8,8 @@
 #include <Stepper.h>
 #include <hardware/pio.h>
 
+#include "SerialTransport.h"
+
 class MouseHouse {
 public:
   static constexpr int kDefaultFeedSteps = 300;
@@ -50,6 +52,17 @@ public:
   void setCompatibilitySerialMode(bool enabled);
   void setSerialCommandHandler(SerialCommandHandler handler);
   void setTaskContext(const char* context);
+  bool emitLegacyLine(const char* line);
+  void logEvent(const char* eventType,
+                uint64_t unixTime,
+                uint64_t rp2040Time,
+                const char* side,
+                unsigned long count,
+                uint64_t duration,
+                uint64_t latency,
+                long value,
+                const char* context,
+                const char* reason);
 
   void feed(int steps = kDefaultFeedSteps);
   void playTone(unsigned int freq, uint64_t durationMs);
@@ -146,7 +159,7 @@ private:
   static constexpr size_t kSerialCmdBufferSize = 96;
   static constexpr int kMaxFeedCommandSteps = 100000;
   static constexpr unsigned long kHouseLightCheckIntervalMs = 1000UL;
-  static constexpr uint32_t kCameraLogsPerUpdate = 8;
+  static constexpr uint64_t kCameraCheckpointIntervalUs = 1000000ULL;
   static constexpr long kNotApplicable = 69420;
   static constexpr const char* kNanString = "nan";
 
@@ -169,9 +182,14 @@ private:
   uint cameraProgramOffset_ = 0;
   int cameraIrq_ = -1;
   volatile uint32_t cameraIrqFrameCount_ = 0;
+  volatile uint64_t cameraFirstIrqUs_ = 0;
+  volatile uint64_t cameraLastIrqUs_ = 0;
   uint32_t cameraLoggedFrameCount_ = 0;
   uint64_t cameraFirstFrameUs_ = 0;
   bool cameraPioReady_ = false;
+  bool cameraEpochQueued_ = false;
+  uint64_t nextCameraCheckpointUs_ = 0;
+  uint32_t sessionId_ = 0;
 
   TimedBinaryEvent leftPokeEvent_;
   TimedBinaryEvent rightPokeEvent_;
@@ -249,20 +267,26 @@ private:
   bool compatibilitySerialMode_ = false;
   SerialCommandHandler serialCommandHandler_ = nullptr;
   char taskContext_[32] = "";
+  SerialTransport transport_;
+  bool integrityFailSafePending_ = false;
+  bool integrityFailSafeApplied_ = false;
+  bool integrityReportPending_ = false;
+  bool integrityCameraStopPending_ = false;
+  uint32_t integrityFinalFrameCount_ = 0;
+  uint64_t integrityFinalFrameUs_ = 0;
 
   uint64_t getTimestampUs() const;
   void robustShow();
-  void logEvent(const char* eventType,
-                uint64_t unixTime,
-                uint64_t rp2040Time,
-                const char* side,
-                unsigned long count,
-                uint64_t duration,
-                uint64_t latency,
-                long value,
-                const char* context,
-                const char* reason);
   const char* getContext() const;
+  bool queueText(uint8_t messageType, SerialTransport::Priority priority,
+                 const char* format, ...);
+  void noteRequiredRecordFailure(const char* type, uint64_t timestampUs);
+  void applyIntegrityFailSafe();
+  void serviceIntegrityReports();
+  void queueTransportStatus();
+  void queueCameraRecord(uint8_t messageType, const char* reason,
+                         SerialTransport::Priority priority,
+                         uint32_t triggerCount, uint64_t triggerTimestampUs);
 
   void resetSessionEventCounts();
   void resetSerialCommandBuffer();
@@ -346,6 +370,8 @@ private:
   bool initializeCameraPio();
   void startCameraPio();
   void stopCameraPio();
+  void snapshotCameraIrq(uint32_t& count, uint64_t& firstUs,
+                         uint64_t& lastUs) const;
   void drainCameraEvents();
   static void cameraPioIrqHandler();
   static MouseHouse* cameraPioOwner_;
