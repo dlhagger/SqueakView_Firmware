@@ -266,6 +266,7 @@ private:
   bool serialCmdOverflow_ = false;
   bool compatibilitySerialMode_ = false;
   SerialCommandHandler serialCommandHandler_ = nullptr;
+  const char* startupFault_ = nullptr;
   char taskContext_[32] = "";
   SerialTransport transport_;
   bool integrityFailSafePending_ = false;

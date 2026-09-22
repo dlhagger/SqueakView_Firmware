@@ -109,7 +109,8 @@ ACTION_TEXT = {
     ),
     "RUN_CAMERA_START_STOP": (
         "Test the camera synchronization output",
-        "Start the 30 FPS test, observe several pulses on the receiver or meter, then stop it.",
+        "Start the 30 FPS test, let the measurement ramp reach 60 seconds while "
+        "observing the physical receiver or meter, then stop it.",
     ),
     "CONFIRM_CAMERA_TTL": (
         "Was the physical camera TTL detected?",
@@ -167,6 +168,13 @@ class QualificationState:
     final_record: dict[str, str] | None = None
     last_error: str = ""
     protocol_version: str = ""
+    feeder_jammed: bool = False
+    camera_running: bool = False
+    camera_target_fps: int = 0
+    camera_trigger_count: int = 0
+    camera_first_trigger_count: int = 0
+    camera_first_trigger_us: int = 0
+    camera_last_trigger_us: int = 0
 
     @property
     def title(self) -> str:
@@ -180,6 +188,33 @@ class QualificationState:
     def awaiting_confirmation(self) -> bool:
         return self.stage in CONFIRMATION_STAGES
 
+    @property
+    def camera_elapsed_seconds(self) -> float:
+        if self.camera_last_trigger_us <= self.camera_first_trigger_us:
+            return 0.0
+        return (self.camera_last_trigger_us - self.camera_first_trigger_us) / 1_000_000
+
+    @property
+    def camera_rate_hz(self) -> float | None:
+        elapsed = self.camera_elapsed_seconds
+        trigger_delta = self.camera_trigger_count - self.camera_first_trigger_count
+        if elapsed <= 0 or trigger_delta <= 0:
+            return None
+        return trigger_delta / elapsed
+
+    def reset_camera_measurement(self) -> None:
+        self.camera_trigger_count = 0
+        self.camera_first_trigger_count = 0
+        self.camera_first_trigger_us = 0
+        self.camera_last_trigger_us = 0
+
+    def observe_camera_trigger(self, count: int, rp2040_us: int) -> None:
+        if self.camera_first_trigger_us == 0 or count < self.camera_trigger_count:
+            self.camera_first_trigger_count = count
+            self.camera_first_trigger_us = rp2040_us
+        self.camera_trigger_count = count
+        self.camera_last_trigger_us = rp2040_us
+
     def reset(self) -> None:
         self.stage = "DISCONNECTED"
         self.action = ""
@@ -188,10 +223,54 @@ class QualificationState:
         self.final_record = None
         self.last_error = ""
         self.protocol_version = ""
+        self.feeder_jammed = False
+        self.camera_running = False
+        self.camera_target_fps = 0
+        self.reset_camera_measurement()
 
     def apply_line(self, line: str) -> str:
         """Apply a firmware line and return a high-level event name."""
         kind, positional, keyed = parse_fields(line)
+        if kind == "ACK_START" and len(positional) >= 4:
+            self.reset_camera_measurement()
+            self.camera_running = True
+            self.camera_target_fps = int(positional[3])
+            return "camera_started"
+        if kind == "CAMERA_HIGH" and len(positional) >= 4:
+            self.camera_running = True
+            self.observe_camera_trigger(int(positional[3]), int(positional[1]))
+            return "camera_trigger"
+        if kind == "ACK_STOP":
+            self.camera_running = False
+            if len(positional) >= 4:
+                self.camera_trigger_count = int(positional[3])
+            return "camera_stopped"
+        if kind == "FEED_JAM":
+            self.feeder_jammed = True
+            return "jam"
+        if kind == "DEBUG_EVENT" and positional:
+            if positional[0] == "FEED_JAM_LATCHED":
+                self.feeder_jammed = True
+                return "jam"
+            if positional[0] == "FEED_JAM_CLEARED":
+                self.feeder_jammed = False
+                return "jam_cleared"
+            if positional[0] == "SESSION_RUNNING":
+                self.camera_running = True
+                return "camera_started"
+            if positional[0] == "SESSION_STOPPED":
+                self.camera_running = False
+                return "camera_stopped"
+        if kind == "DEBUG_STATUS" and "feed_jammed" in keyed:
+            self.feeder_jammed = keyed["feed_jammed"] == "1"
+            return "status"
+        if kind == "ACK_CLEAR_JAM":
+            self.feeder_jammed = False
+            return "jam_cleared"
+        if kind == "SETUP_RECOVERY" and positional:
+            if positional[0] == "PHYSICALLY_CLEAR_FEEDER_THEN_SEND CLEAR_JAM":
+                self.feeder_jammed = True
+                return "jam"
         if kind == "SETUP_STAGE" and positional:
             self.stage = positional[0]
             return "stage"
@@ -216,6 +295,10 @@ class QualificationState:
             self.device_id = positional[0]
             return "device"
         if kind == "NACK":
+            if positional[:2] == ["FEED", "JAMMED"]:
+                self.feeder_jammed = True
+            if positional[:2] == ["START", "ALREADY_RUNNING"]:
+                self.camera_running = True
             self.last_error = line
             return "error"
         if kind == "SETUP_DEBUG_READY":

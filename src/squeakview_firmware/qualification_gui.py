@@ -12,7 +12,7 @@ from pathlib import Path
 import serial
 from serial.tools import list_ports
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -44,8 +45,9 @@ from .qualification import CHECK_LABELS, PROTOCOL_VERSION, QualificationState, p
 
 
 APP_STYLE = """
-QMainWindow { background: #10151d; }
-QWidget { color: #e8eef7; font-size: 14px; }
+QMainWindow, QDialog { background: #10151d; }
+QWidget { color: #e8eef7; font-size: 14px; selection-background-color: #2476c8;
+  selection-color: #ffffff; }
 QFrame#card { background: #18212d; border: 1px solid #2a394b; border-radius: 12px; }
 QLabel#eyebrow { color: #75b9ff; font-weight: 700; letter-spacing: 1px; }
 QLabel#title { font-size: 28px; font-weight: 750; color: #ffffff; }
@@ -56,19 +58,72 @@ QLabel#notice { color: #ffd479; font-weight: 650; }
 QLineEdit, QComboBox, QPlainTextEdit, QTreeWidget {
   background: #0d131b; border: 1px solid #34465a; border-radius: 7px;
   color: #e8eef7; padding: 7px; selection-background-color: #2476c8;
+  selection-color: #ffffff;
 }
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTreeWidget:focus {
+  border: 1px solid #4c9bea;
+}
+QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled,
+QTreeWidget:disabled { color: #718094; background: #111923; border-color: #263545; }
+QComboBox { padding-right: 34px; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;
+  width: 30px; border: 0; border-left: 1px solid #34465a; background: #223044;
+  border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+QComboBox::down-arrow { width: 10px; height: 10px; }
+QComboBox QAbstractItemView { background: #111923; color: #e8eef7;
+  border: 1px solid #425a73; border-radius: 7px; padding: 4px; outline: 0;
+  selection-background-color: #2476c8; selection-color: #ffffff; }
+QAbstractItemView::item { min-height: 26px; padding: 4px 7px; border: 0; }
+QAbstractItemView::item:hover { background: #223a52; }
+QAbstractItemView::item:selected { background: #2476c8; color: #ffffff; }
 QPushButton { background: #27384b; border: 1px solid #3b536d; border-radius: 8px;
   padding: 9px 15px; font-weight: 650; }
 QPushButton:hover { background: #324a63; }
+QPushButton:pressed { background: #1f2d3d; border-color: #75b9ff; }
+QPushButton:focus { border: 1px solid #75b9ff; }
 QPushButton:disabled { color: #697889; background: #1a232e; }
 QPushButton#primary { background: #1675d1; border-color: #3c9aff; color: white; }
+QPushButton#primary:hover { background: #2185e4; }
 QPushButton#success { background: #197548; border-color: #32b875; color: white; }
 QPushButton#danger { background: #7e2935; border-color: #c74b5c; color: white; }
-QTreeWidget { outline: none; }
-QHeaderView::section { background: #18212d; color: #9eb0c4; border: 0; padding: 7px; }
-QScrollBar:vertical { background: #10151d; width: 12px; }
-QScrollBar::handle:vertical { background: #34465a; border-radius: 5px; min-height: 24px; }
+QProgressBar { background: #0d131b; border: 1px solid #34465a; border-radius: 7px;
+  min-height: 22px; text-align: center; color: #e8eef7; }
+QProgressBar::chunk { background: #32b875; border-radius: 6px; }
+QTreeWidget { outline: 0; alternate-background-color: #111923; }
+QTreeWidget::item { border: 0; padding: 2px 3px; }
+QTreeWidget::item:selected { background: #2476c8; color: #ffffff; }
+QHeaderView::section { background: #18212d; color: #9eb0c4; border: 0;
+  border-bottom: 1px solid #34465a; padding: 7px; }
+QScrollBar:vertical { background: #0d131b; width: 12px; margin: 0; border: 0; }
+QScrollBar::handle:vertical { background: #425a73; border-radius: 5px;
+  min-height: 28px; margin: 2px; }
+QScrollBar::handle:vertical:hover { background: #587797; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; border: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QScrollBar:horizontal { background: #0d131b; height: 12px; margin: 0; border: 0; }
+QScrollBar::handle:horizontal { background: #425a73; border-radius: 5px;
+  min-width: 28px; margin: 2px; }
+QScrollBar::handle:horizontal:hover { background: #587797; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; border: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+QSplitter::handle { background: #10151d; }
+QSplitter::handle:hover { background: #34465a; }
+QMenu { background: #111923; color: #e8eef7; border: 1px solid #425a73; padding: 4px; }
+QMenu::item { padding: 7px 22px 7px 10px; border-radius: 4px; }
+QMenu::item:selected { background: #2476c8; color: #ffffff; }
+QToolTip { background: #223044; color: #ffffff; border: 1px solid #587797;
+  padding: 5px; }
+QFileDialog QListView, QFileDialog QTreeView, QFileDialog QSidebar {
+  background: #0d131b; color: #e8eef7; border: 1px solid #34465a; }
 """
+
+HANDSHAKE_TIMEOUT_MS = 4000
+
+
+def is_mousehouse_serial_port(info: object) -> bool:
+    """Return true only for USB CDC serial devices usable by the RP2040 GUI."""
+    device = str(getattr(info, "device", ""))
+    return Path(device).name.startswith("ttyACM")
 
 
 class QualificationWindow(QMainWindow):
@@ -91,16 +146,26 @@ class QualificationWindow(QMainWindow):
         self.clock_gate_pending_sequence: int | None = None
         self.clock_gate_pending_sent_ns: int | None = None
         self.clock_gate_after_correction = False
+        self.connection_issue = ""
+        self.camera_start_pending = False
         self._build_ui()
         self.setStyleSheet(APP_STYLE)
 
         self.read_timer = QTimer(self)
         self.read_timer.setInterval(25)
         self.read_timer.timeout.connect(self._read_serial)
+        self.handshake_timer = QTimer(self)
+        self.handshake_timer.setSingleShot(True)
+        self.handshake_timer.setInterval(HANDSHAKE_TIMEOUT_MS)
+        self.handshake_timer.timeout.connect(self._handshake_timeout)
         self.port_timer = QTimer(self)
         self.port_timer.setInterval(2000)
         self.port_timer.timeout.connect(self._refresh_ports_silently)
         self.port_timer.start()
+        self.camera_display_timer = QTimer(self)
+        self.camera_display_timer.setInterval(250)
+        self.camera_display_timer.timeout.connect(self._update_camera_metrics)
+        self.camera_display_timer.start()
         self.refresh_ports()
         self._render()
 
@@ -224,7 +289,7 @@ class QualificationWindow(QMainWindow):
         self.clear_jam_button = QPushButton("I cleared the mechanism — Clear Jam")
         self.clear_jam_button.clicked.connect(lambda: self.send_command("CLEAR_JAM"))
         self.camera_start_button = QPushButton("Start 30 FPS")
-        self.camera_start_button.clicked.connect(lambda: self.send_command("START,30"))
+        self.camera_start_button.clicked.connect(self.start_camera_test)
         self.camera_stop_button = QPushButton("Stop camera test")
         self.camera_stop_button.clicked.connect(lambda: self.send_command("STOP"))
         special_layout.addWidget(self.rtc_button)
@@ -232,6 +297,32 @@ class QualificationWindow(QMainWindow):
         special_layout.addWidget(self.camera_start_button)
         special_layout.addWidget(self.camera_stop_button)
         action_layout.addWidget(self.special_row)
+
+        self.camera_metrics = QFrame()
+        self.camera_metrics.setObjectName("card")
+        camera_metrics_layout = QVBoxLayout(self.camera_metrics)
+        camera_metrics_layout.setContentsMargins(14, 12, 14, 12)
+        camera_metrics_layout.setSpacing(7)
+        self.camera_state_label = QLabel("○ IDLE — no TTL pulses")
+        self.camera_state_label.setStyleSheet(
+            "font-size:17px;font-weight:750;color:#91a4ba"
+        )
+        camera_metrics_layout.addWidget(self.camera_state_label)
+        self.camera_rate_label = QLabel("Controller TTL output: waiting to start")
+        camera_metrics_layout.addWidget(self.camera_rate_label)
+        self.camera_progress = QProgressBar()
+        self.camera_progress.setRange(0, 60_000)
+        self.camera_progress.setValue(0)
+        self.camera_progress.setFormat("0.0 / 60.0 s")
+        camera_metrics_layout.addWidget(self.camera_progress)
+        self.camera_measurement_note = QLabel(
+            "This measures controller-generated TTL output. Compare it with the "
+            "physical receiver, oscilloscope, or camera measurement."
+        )
+        self.camera_measurement_note.setWordWrap(True)
+        self.camera_measurement_note.setStyleSheet("color:#91a4ba")
+        camera_metrics_layout.addWidget(self.camera_measurement_note)
+        action_layout.addWidget(self.camera_metrics)
 
         confirmation = QHBoxLayout()
         self.yes_button = QPushButton("Yes — Pass")
@@ -287,15 +378,22 @@ class QualificationWindow(QMainWindow):
         return label
 
     def choose_output_directory(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Choose qualification log directory", self.output_edit.text()
-        )
-        if chosen:
-            self.output_edit.setText(chosen)
+        dialog = QFileDialog(self, "Choose qualification log directory")
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setDirectory(self.output_edit.text())
+        if dialog.exec():
+            selected = dialog.selectedFiles()
+            if selected:
+                self.output_edit.setText(selected[0])
 
     def refresh_ports(self) -> None:
         current = self.port_combo.currentData() or self.port_combo.currentText()
-        ports = sorted(list_ports.comports(), key=lambda item: item.device)
+        ports = sorted(
+            (info for info in list_ports.comports() if is_mousehouse_serial_port(info)),
+            key=lambda item: item.device,
+        )
         self.port_combo.clear()
         for info in ports:
             label = f"{info.device} — {info.description}"
@@ -307,6 +405,8 @@ class QualificationWindow(QMainWindow):
                     break
         if ports and self.port_combo.currentIndex() < 0:
             self.port_combo.setCurrentIndex(0)
+        if not ports:
+            self.port_combo.addItem("No RP2040 USB serial device found", None)
 
     def _refresh_ports_silently(self) -> None:
         if self.port is None:
@@ -332,6 +432,7 @@ class QualificationWindow(QMainWindow):
         self.rx_buffer.clear()
         self.transcript.clear()
         self.saved_record_line = ""
+        self.connection_issue = ""
         self._reset_clock_gate()
         self.output_directory = Path(self.output_edit.text()).expanduser()
         try:
@@ -349,17 +450,52 @@ class QualificationWindow(QMainWindow):
         self.port_combo.setEnabled(False)
         self.read_timer.start()
         self._append_log(f"Connected to {device}", "HOST")
-        QTimer.singleShot(750, lambda: self.send_command("TEST,HELLO"))
+        QTimer.singleShot(750, self._begin_handshake)
         self._render()
+
+    def _begin_handshake(self) -> None:
+        if self.port is None:
+            return
+        if not self.connection_issue:
+            self.notice.setText("Waiting for the setup_debug firmware handshake…")
+        self.send_command("TEST,HELLO")
+        if self.port is not None:
+            self.handshake_timer.start()
+        self._render()
+
+    def _handshake_timeout(self) -> None:
+        if self.port is None or self.state.protocol_version:
+            return
+        if self.connection_issue:
+            self._append_log("Firmware handshake timed out after startup fault", "ERROR")
+            self._render()
+            return
+        self._set_connection_issue(
+            "The USB port opened, but the controller did not answer TEST,HELLO. "
+            "Confirm that setup_debug was flashed, press RESET, and inspect the log "
+            "for ERROR_NO_RTC or ERROR_NO_MPR121."
+        )
+        self._append_log("Firmware handshake timed out", "ERROR")
+        self._render()
+
+    def _set_connection_issue(self, message: str) -> None:
+        self.connection_issue = message
+        self.connection_badge.setText("● Controller not responding")
+        self.connection_badge.setObjectName("connectionBad")
+        self.connection_badge.style().unpolish(self.connection_badge)
+        self.connection_badge.style().polish(self.connection_badge)
+        self.notice.setText(message)
 
     def disconnect_serial(self, reason: str = "Disconnected") -> None:
         self.read_timer.stop()
+        self.handshake_timer.stop()
         if self.port is not None:
             try:
                 self.port.close()
             except serial.SerialException:
                 pass
         self.port = None
+        self.connection_issue = ""
         self.connection_badge.setText(f"● {reason}")
         self.connection_badge.setObjectName("connectionBad")
         self.connection_badge.style().unpolish(self.connection_badge)
@@ -388,6 +524,18 @@ class QualificationWindow(QMainWindow):
 
     def _handle_line(self, line: str, received_ns: int | None = None) -> None:
         self._append_log(line, "RX")
+        if line.startswith("ERROR_NO_RTC") or line.startswith("STARTUP_FAULT,NO_RTC"):
+            self.handshake_timer.stop()
+            self._set_connection_issue(
+                "Controller startup stopped safely because the PCF8523 RTC was not detected. "
+                "Inspect RTC power and the I²C wiring."
+            )
+        elif line.startswith("ERROR_NO_MPR121") or line.startswith("STARTUP_FAULT,NO_MPR121"):
+            self.handshake_timer.stop()
+            self._set_connection_issue(
+                "Controller startup stopped safely because the MPR121 was not detected. "
+                "Inspect touch-controller power and the I²C wiring."
+            )
         if line.startswith("CLOCK_SYNC,"):
             self._handle_clock_sync_response(line, received_ns or time.time_ns())
         elif line.startswith("ACK_SET_RTC,") and self.clock_gate_state == "correcting":
@@ -396,6 +544,10 @@ class QualificationWindow(QMainWindow):
                 self.clock_validation_record["correction_applied"] = True
             QTimer.singleShot(100, lambda: self._start_clock_validation(True))
         event = self.state.apply_line(line)
+        if event == "camera_started":
+            self.camera_start_pending = False
+        elif event == "error" and line.startswith("NACK,START,"):
+            self.camera_start_pending = False
         if line.startswith("SETUP_LED_TEST,"):
             color = line.split(",", 1)[1]
             self.notice.setText(f"LED sweep currently showing: {color}")
@@ -404,6 +556,15 @@ class QualificationWindow(QMainWindow):
             result = values.get("result", "")
             step = values.get("step", "test").replace("_", " ").title()
             self.notice.setText(f"{step}: {result}")
+        elif event == "jam":
+            self.notice.setText(
+                "Feeder jam is latched. Restore motor power, inspect and physically "
+                "clear the mechanism, then use Clear Jam to retry this test."
+            )
+        elif event == "jam_cleared":
+            self.notice.setText(
+                "Feeder jam cleared. Repeat the action shown for the current test stage."
+            )
         elif event == "error":
             if line.startswith("NACK,TIME_SYNC,") or line.startswith("NACK,SET_RTC,"):
                 self._fail_clock_gate("CONTROLLER_REJECTED_CLOCK_COMMAND", line)
@@ -414,7 +575,9 @@ class QualificationWindow(QMainWindow):
             else:
                 self.notice.setText(f"Controller rejected a command: {line}")
         elif event == "protocol":
+            self.handshake_timer.stop()
             if self.state.protocol_version == PROTOCOL_VERSION:
+                self.connection_issue = ""
                 self.notice.setText("Firmware protocol verified. Follow the current instruction.")
             else:
                 self.notice.setText(
@@ -448,6 +611,57 @@ class QualificationWindow(QMainWindow):
             )
             return
         self.send_command(f"TEST,DEVICE,{device_id}")
+
+    def start_camera_test(self) -> None:
+        if self.state.camera_running or self.camera_start_pending:
+            return
+        self.state.reset_camera_measurement()
+        self.camera_start_pending = True
+        self.send_command("START,30")
+        QTimer.singleShot(3000, self._camera_start_timeout)
+        self._update_camera_metrics()
+
+    def _camera_start_timeout(self) -> None:
+        if not self.camera_start_pending:
+            return
+        self.camera_start_pending = False
+        self.notice.setText(
+            "The controller did not confirm that camera TTL output started. Check the device log."
+        )
+        self._render()
+
+    def _update_camera_metrics(self) -> None:
+        count = self.state.camera_trigger_count
+        elapsed = self.state.camera_elapsed_seconds
+        rate = self.state.camera_rate_hz
+        if self.camera_start_pending:
+            self.camera_state_label.setText("◌ STARTING — waiting for the first TTL pulse")
+            self.camera_state_label.setStyleSheet(
+                "font-size:17px;font-weight:750;color:#ffd479"
+            )
+        elif self.state.camera_running:
+            self.camera_state_label.setText("● RUNNING — controller TTL pulses active")
+            self.camera_state_label.setStyleSheet(
+                "font-size:17px;font-weight:750;color:#62d995"
+            )
+        elif count:
+            self.camera_state_label.setText("■ STOPPED — TTL sample captured")
+            self.camera_state_label.setStyleSheet(
+                "font-size:17px;font-weight:750;color:#75b9ff"
+            )
+        else:
+            self.camera_state_label.setText("○ IDLE — no TTL pulses")
+            self.camera_state_label.setStyleSheet(
+                "font-size:17px;font-weight:750;color:#91a4ba"
+            )
+        rate_text = "calculating…" if rate is None else f"{rate:.4f} Hz"
+        self.camera_rate_label.setText(
+            f"Controller TTL output: {count:,} pulses · {rate_text}"
+        )
+        progress_seconds = min(elapsed, 60.0)
+        self.camera_progress.setValue(round(progress_seconds * 1000))
+        suffix = " · sample complete" if elapsed >= 60.0 else ""
+        self.camera_progress.setFormat(f"{progress_seconds:.1f} / 60.0 s{suffix}")
 
     def _reset_clock_gate(self) -> None:
         self.clock_validation_record = None
@@ -660,15 +874,27 @@ class QualificationWindow(QMainWindow):
 
     def _render(self) -> None:
         connected = self.port is not None
-        protocol_ok = connected and self.state.protocol_version == PROTOCOL_VERSION
+        protocol_ok = (
+            connected
+            and not self.connection_issue
+            and self.state.protocol_version == PROTOCOL_VERSION
+        )
         stage = self.state.stage
         self.stage_label.setText(f"CURRENT STAGE  •  {stage.replace('_', ' ')}")
-        self.action_title.setText(self.state.title if connected else "Connect the controller")
-        self.instructions.setText(
-            self.state.instructions
-            if connected
-            else "Close any PlatformIO serial monitor, select the RP2040 serial device, and connect."
-        )
+        if self.connection_issue:
+            self.action_title.setText("Controller startup needs attention")
+            self.instructions.setText(self.connection_issue)
+        elif protocol_ok:
+            self.action_title.setText(self.state.title)
+            self.instructions.setText(self.state.instructions)
+        elif connected:
+            self.action_title.setText("Waiting for setup_debug firmware")
+            self.instructions.setText("The USB port is open; waiting for the qualification handshake.")
+        else:
+            self.action_title.setText("Connect the controller")
+            self.instructions.setText(
+                "Close any PlatformIO serial monitor, select the RP2040 USB serial device, and connect."
+            )
         complete = sum(self.state.checks.values())
         self.progress_summary.setText(f"{complete} of {len(self.state.checks)} checks complete")
         for key, item in self.check_items.items():
@@ -698,10 +924,20 @@ class QualificationWindow(QMainWindow):
             and self.clock_gate_state
             not in {"validating_before", "validating_after", "correcting", "passed"}
         )
-        self.clear_jam_button.setVisible(protocol_ok and stage == "JAM_CLEAR")
+        self.clear_jam_button.setVisible(
+            protocol_ok and (stage == "JAM_CLEAR" or self.state.feeder_jammed)
+        )
         camera = protocol_ok and stage == "CAMERA_CYCLE"
         self.camera_start_button.setVisible(camera)
         self.camera_stop_button.setVisible(camera)
+        self.camera_metrics.setVisible(
+            protocol_ok and stage in {"CAMERA_CYCLE", "CAMERA_CONFIRM"}
+        )
+        self.camera_start_button.setEnabled(
+            camera and not self.state.camera_running and not self.camera_start_pending
+        )
+        self.camera_stop_button.setEnabled(camera and self.state.camera_running)
+        self._update_camera_metrics()
         self.status_button.setEnabled(protocol_ok)
         self.restart_button.setEnabled(protocol_ok)
         self.abort_button.setEnabled(protocol_ok and stage not in {"COMPLETE", "ABORTED"})
@@ -714,6 +950,21 @@ class QualificationWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("MouseHouse Qualification")
+    app.setStyle("Fusion")
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor("#10151d"))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor("#e8eef7"))
+    palette.setColor(QPalette.ColorRole.Base, QColor("#0d131b"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#111923"))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#223044"))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.Text, QColor("#e8eef7"))
+    palette.setColor(QPalette.ColorRole.Button, QColor("#27384b"))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#e8eef7"))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#2476c8"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#718094"))
+    app.setPalette(palette)
     window = QualificationWindow()
     window.show()
     raise SystemExit(app.exec())

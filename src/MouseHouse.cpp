@@ -343,6 +343,19 @@ void MouseHouse::queueTransportStatus() {
 
 void MouseHouse::handleSerialCommand(const char* cmd) {
   uint64_t receivedUs = time_us_64();
+  if (startupFault_ != nullptr) {
+    bool diagnosticCommand = strcmp(cmd, "TEST,HELLO") == 0
+                             || strcmp(cmd, "TEST,STATUS") == 0;
+    if (diagnosticCommand && serialCommandHandler_ != nullptr
+        && serialCommandHandler_(cmd)) {
+      queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+                SerialTransport::PRIORITY_SAFETY,
+                "STARTUP_FAULT,%s", startupFault_);
+    } else {
+      sendCommandError("STARTUP", startupFault_);
+    }
+    return;
+  }
   if (strcmp(cmd, "PROTO,2") == 0) {
     if (running_ || feedActive_) {
       sendCommandError("PROTO", "DEVICE_BUSY");
@@ -1734,8 +1747,10 @@ void MouseHouse::begin() {
   transport_.begin(get_rand_64());
 
   if (!rtc_.begin()) {
+    startupFault_ = "NO_RTC";
     emitLegacyLine("ERROR_NO_RTC");
     while (1) {
+      checkSerialCommands();
       transport_.serviceOutput();
     }
   }
@@ -1771,8 +1786,10 @@ void MouseHouse::begin() {
 
   framePeriodUs_ = 1000000ULL / fps_;
   if (!cap_.begin(0x5A)) {
+    startupFault_ = "NO_MPR121";
     emitLegacyLine("ERROR_NO_MPR121");
     while (1) {
+      checkSerialCommands();
       transport_.serviceOutput();
     }
   }

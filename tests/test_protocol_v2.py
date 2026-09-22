@@ -282,6 +282,16 @@ class FirmwarePolicyTests(unittest.TestCase):
         for forbidden in ("Serial.flush", "readString", "readStringUntil", "parseInt"):
             self.assertNotIn(forbidden, combined)
 
+    def test_startup_fault_loop_remains_diagnostic_but_fail_closed(self):
+        self.assertIn('startupFault_ = "NO_RTC";', self.controller)
+        self.assertIn('startupFault_ = "NO_MPR121";', self.controller)
+        startup_fault = self.controller.split(
+            "if (startupFault_ != nullptr)", 1
+        )[1].split('if (strcmp(cmd, "PROTO,2")', 1)[0]
+        self.assertIn('strcmp(cmd, "TEST,HELLO")', startup_fault)
+        self.assertIn('strcmp(cmd, "TEST,STATUS")', startup_fault)
+        self.assertIn('sendCommandError("STARTUP", startupFault_)', startup_fault)
+
     def test_v2_has_no_per_frame_edge_loop(self):
         camera = self.controller.split("void MouseHouse::drainCameraEvents()", 1)[1]
         v2_branch = camera.split("if (transport_.v2EnabledOrPending())", 1)[1]

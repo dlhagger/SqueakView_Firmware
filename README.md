@@ -77,6 +77,17 @@ physical direction reversal. The wizard also sounds the buzzer, requests a
 `START,30`/`STOP` camera cycle and physical TTL confirmation, and requests
 house-light confirmation.
 
+During the camera cycle, the GUI shows an authoritative running indicator,
+controller TTL pulse count, timestamp-derived output rate, and a 60-second
+measurement ramp. This is controller-output telemetry, not proof that the
+physical camera received every pulse; compare it with the receiver, camera, or
+test instrument before confirming the physical TTL check.
+
+If a jam occurs unexpectedly during either successful-feed test, the GUI keeps
+the current qualification stage and exposes **Clear Jam** immediately. Restore
+motor power, inspect and physically clear the feeder, clear the firmware latch,
+and then repeat the current prompted action.
+
 Useful wizard commands are:
 
 ```text
@@ -216,7 +227,9 @@ Use `--set-rtc` only while the controller is stopped and reports `RTC_INVALID`.
 Startup no longer waits for a USB serial connection; transport output remains
 queued and the rig can stay safe when the host is absent. A missing PCF8523 RTC
 or MPR121 sensor queues `ERROR_NO_RTC` or `ERROR_NO_MPR121` and remains in a
-safe halted state while servicing only the queued error output. An RTC with lost power or an
+safe halted state. That state accepts only the qualification `TEST,HELLO` and
+`TEST,STATUS` diagnostics, repeats the fault as `STARTUP_FAULT,<reason>`, and
+rejects every other command as `NACK,STARTUP,<reason>`. An RTC with lost power or an
 implausible date leaves the controller responsive to serial commands, but
 `START` returns `NACK,START,RTC_INVALID` until `SET_RTC` succeeds.
 
