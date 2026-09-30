@@ -12,7 +12,9 @@
 
 class MouseHouse {
 public:
-  static constexpr int kDefaultFeedSteps = 300;
+  // Calibrated pellet-disk travel: 300 motor steps moves one 45-degree hole
+  // position, so the default 1200-step feed moves the disk 180 degrees.
+  static constexpr int kDefaultFeedSteps = 1200;
   using SerialCommandHandler = bool (*)(const char* command);
 
   enum PelletSensorMode {
