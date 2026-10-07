@@ -80,6 +80,7 @@ uint64_t rightPokeStartUnix = 0;
 bool prevLeftPokeActive = false;
 bool prevRightPokeActive = false;
 bool prevFeedActive = false;
+bool prevFeedJammed = false;
 bool trialAvailabilityLit = false;
 int trialAvailabilitySide = -1;
 bool leftPokeEligible = false;
@@ -171,6 +172,7 @@ int pickTrialType() {
 }
 
 bool isInitiationEligible() {
+  if (mh.isFeedJammed()) return false;
   if (mh.isTimeoutActive() || rewardFeedStarting || mh.isFeedActive()) return false;
   if (mh.isPelletAvailable()) return false;
   if (mh.pelletSensorBlocked()) return false;
@@ -470,7 +472,12 @@ void maybeAdvancePhase4MixOnRewardStart() {
 }
 
 void registerRewardFeedStart() {
+  if (mh.isFeedActive() || mh.isFeedJammed()) return;
   rewardFeedStarting = true;
+  syncLibraryTaskContext();
+  mh.feed(REWARD_FEED_STEPS);
+  rewardFeedStarting = false;
+  if (!mh.isFeedActive()) return;
   rewardFeedCount++;
 
   if (trainingPhase == PHASE_1_FR1 && (rewardFeedCount - phaseFeedBase) >= PHASE_1_PELLET_THRESH) {
@@ -484,8 +491,6 @@ void registerRewardFeedStart() {
   }
 
   syncLibraryTaskContext();
-  mh.feed(REWARD_FEED_STEPS);
-  rewardFeedStarting = false;
 }
 
 void set_trial_available_off() {
@@ -498,7 +503,8 @@ void set_trial_available_off() {
 }
 
 void set_trial_available_on() {
-  if (mh.isPelletAvailable() || mh.pelletSensorBlocked() || waitingForRelease) {
+  if (mh.isFeedJammed() || mh.isPelletAvailable()
+      || mh.pelletSensorBlocked() || waitingForRelease) {
     logTrialAvailabilityDebug("Blocked");
     set_trial_available_off();
     return;
@@ -624,6 +630,7 @@ void syncPokeStatesToCurrent() {
   prevLeftPokeActive = mh.leftPokeActive();
   prevRightPokeActive = mh.rightPokeActive();
   prevFeedActive = mh.isFeedActive();
+  prevFeedJammed = mh.isFeedJammed();
   uint64_t nowUnix = get_timestamp_us();
   leftPokeStartUnix = prevLeftPokeActive ? nowUnix : 0;
   rightPokeStartUnix = prevRightPokeActive ? nowUnix : 0;
@@ -782,14 +789,16 @@ void updatePelletAvailability() {
 
 void handleFeedStateTransitions() {
   bool feedNow = mh.isFeedActive();
+  bool jammedNow = mh.isFeedJammed();
 
-  if (prevFeedActive && !feedNow) {
+  if ((prevFeedActive && !feedNow) || (prevFeedJammed && !jammedNow)) {
     if (mh.isRunning() && !mh.isTimeoutActive()) {
       set_trial_available_on();
     }
   }
 
   prevFeedActive = feedNow;
+  prevFeedJammed = jammedNow;
 }
 
 void handleSessionStart() {

@@ -181,8 +181,11 @@ the first/latest monotonic timestamp, and increments a volatile counter; it neve
 CRC/COBS, or accesses USB. All queue producers run in the main loop, so no queue
 critical section is needed. Main-loop snapshots of the 32/64-bit IRQ fields use
 only a few loads inside a very short interrupt-masked section. PIO generates
-both edges independently of the main loop and its program/timing values are
-unchanged.
+both edges independently of the main loop. FIFO loop counts account for all
+instruction cycles to produce the reported pulse width and integer-microsecond
+period. Legacy per-edge timestamps use the first observed rising-edge IRQ as
+their epoch and reconstruct later edges from that period; IRQ-entry latency
+and oscillator accuracy still require physical validation.
 
 If a required record cannot enter the queue, the controller atomically preserves
 the first lost type/time in dedicated state and latches scientific integrity

@@ -99,6 +99,10 @@ TEST,ABORT
 TEST,RESTART
 ```
 
+Abort cancels pending LED/feed tests, stops the active feeder and camera session,
+and turns the indicators off. Use `TEST,RESTART` to begin a new qualification;
+an existing feeder jam must still be physically cleared and acknowledged first.
+
 Live sensor and GPIO status is request-only: send `TEST,STATUS`. Normal serial
 output is limited to prompts, state transitions, results, and qualification
 records so the guided test does not continuously flood the monitor.
@@ -224,9 +228,10 @@ Use `--set-rtc` only while the controller is stopped and reports `RTC_INVALID`.
 
 ## Startup and hardware failures
 
-Startup no longer waits for a USB serial connection; transport output remains
-queued and the rig can stay safe when the host is absent. A missing PCF8523 RTC
-or MPR121 sensor queues `ERROR_NO_RTC` or `ERROR_NO_MPR121` and remains in a
+Startup waits for a USB serial connection before completing rig initialization.
+After initialization, transport output is queued without blocking acquisition.
+A missing PCF8523 RTC or MPR121 sensor queues `ERROR_NO_RTC` or
+`ERROR_NO_MPR121` and remains in a
 safe halted state. That state accepts only the qualification `TEST,HELLO` and
 `TEST,STATUS` diagnostics, repeats the fault as `STARTUP_FAULT,<reason>`, and
 rejects every other command as `NACK,STARTUP,<reason>`. An RTC with lost power or an
@@ -269,6 +274,17 @@ library example with `#include <MouseHouse.h>`. The generated
 `src/camera_ttl.pio.h` is committed so Arduino builds do not need to invoke
 `pioasm`; the original `src/camera_ttl.pio` remains the editable source. Select
 an RP2040 board using the Arduino-Pico core.
+
+For software regression checks, run `uv run python -m unittest discover -s tests -v`.
+With `g++` installed, this also compiles the production serial transport and task
+sketches against simulated hardware to exercise replay/ACK overlap, abort, and
+jam recovery. Camera tests check the committed PIO instructions against the
+firmware's configured timing. These checks do not validate electrical behavior.
+Follow the physical feeder/LED matrix in [AGENTS.md](AGENTS.md), and additionally
+check abort during the pre-feed delay, active feeding, LED sweep, and camera
+run; jam recovery in go/no-go; startup without a serial connection; and camera
+pulse width/period with a logic analyzer. At 30 FPS, the configured values are
+1,000 µs HIGH and a 33,333 µs period.
 
 Included now:
 

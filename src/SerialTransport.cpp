@@ -301,6 +301,7 @@ bool SerialTransport::prepareFrame(uint8_t slotIndex, bool retransmission) {
   }
   activeSlotIndex_ = slotIndex;
   activeRetransmission_ = retransmission;
+  activeSequence_ = slot.sequence;
   encodedOffset_ = 0;
   frameActive_ = true;
   return true;
@@ -310,7 +311,9 @@ void SerialTransport::finishFrame() {
   Slot& slot = queue_[activeSlotIndex_];
   if (activeRetransmission_) {
     retransmissions_++;
-    resendNextSequence_ = slot.sequence + 1ULL;
+    // An ACK can release and reuse the slot while this replay is in flight.
+    // Advance from the encoded frame's identity, not the slot's current owner.
+    resendNextSequence_ = activeSequence_ + 1ULL;
     if (resendNextSequence_ > resendThroughSequence_
         || findNextResend() < 0) {
       resendActive_ = false;

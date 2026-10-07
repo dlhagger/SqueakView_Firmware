@@ -157,6 +157,7 @@ private:
   bool frameActive_ = false;
   uint8_t activeSlotIndex_ = 0;
   bool activeRetransmission_ = false;
+  uint64_t activeSequence_ = 0;
   uint8_t encoded_[MouseHouseProtocolV2::kMaxEncodedFrameSize];
   uint16_t encodedLength_ = 0;
   uint16_t encodedOffset_ = 0;

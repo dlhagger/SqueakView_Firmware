@@ -478,7 +478,19 @@ void serviceResponse() {
   if (pendingResponse == RESPONSE_NONE) return;
   OperatorResponse response = pendingResponse;
   pendingResponse = RESPONSE_NONE;
-  if (response == RESPONSE_ABORT) { setStage(STAGE_ABORTED); return; }
+  if (response == RESPONSE_ABORT) {
+    // Cancel delayed starts before the test services run again this loop.
+    colorStep = COLOR_DONE;
+    feedTestMode = FEED_TEST_NONE;
+    feedTestPhase = FEED_PHASE_NONE;
+    feedTestDueMs = 0;
+    feedResult = FEED_RESULT_NONE;
+    cameraRunObserved = false;
+    mh.stopSession();
+    allPixelsOff();
+    setStage(STAGE_ABORTED);
+    return;
+  }
   bool yes = response == RESPONSE_YES;
   if (response == RESPONSE_NO) logFailure("OPERATOR_REPORTED_FAILURE");
 
@@ -621,6 +633,8 @@ void setup() {
 void loop() {
   mh.update();
   unsigned long nowMs = millis();
+  // Honor operator responses before sensor-driven stage changes clear them.
+  serviceResponse();
   if (stage == STAGE_FEED_DARK_CLEAR && !mh.pelletSensorBlocked()) {
     setStage(STAGE_FEED_LIGHT);
   } else if (stage == STAGE_FEED_LIGHT_CLEAR && !mh.pelletSensorBlocked()) {
@@ -628,7 +642,6 @@ void loop() {
   }
   processTransitions();
   processEvents();
-  serviceResponse();
   bool colorActive = serviceColorTest(nowMs);
   bool feedActive = serviceFeedTest(nowMs);
   if (!colorActive && !feedActive) allPixelsOff();

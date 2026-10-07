@@ -1551,9 +1551,12 @@ void MouseHouse::startCameraPio() {
   pio_sm_exec(cameraPio_, (uint)cameraSm_,
               pio_encode_jmp(cameraProgramOffset_));
 
-  pio_sm_put_blocking(cameraPio_, (uint)cameraSm_, highTicks - 3U);
-  pio_sm_put_blocking(cameraPio_, (uint)cameraSm_, periodTicks - 2U);
-  pio_sm_put_blocking(cameraPio_, (uint)cameraSm_, lowTicks - 2U);
+  // JMP X--/Y-- executes count + 1 times, including the final fall-through.
+  // High: SET + IRQ + MOV + loop; low: SET + MOV + loop.
+  // Initial delay: two PULLs + two MOVs + SET + loop + final PULL.
+  pio_sm_put_blocking(cameraPio_, (uint)cameraSm_, highTicks - 4U);
+  pio_sm_put_blocking(cameraPio_, (uint)cameraSm_, periodTicks - 7U);
+  pio_sm_put_blocking(cameraPio_, (uint)cameraSm_, lowTicks - 3U);
 
   cameraFirstFrameUs_ = time_us_64() + framePeriodUs_;
   pio_interrupt_clear(cameraPio_, 0);
@@ -1588,8 +1591,10 @@ void MouseHouse::drainCameraEvents() {
   uint64_t lastIrqUs = 0;
   snapshotCameraIrq(observedFrames, firstIrqUs, lastIrqUs);
   frameCounter_ = observedFrames;
+  if (observedFrames == 0) return;
+  // Anchor legacy reconstruction to the same observed first IRQ as v2.
+  cameraFirstFrameUs_ = firstIrqUs;
   if (transport_.v2EnabledOrPending()) {
-    if (observedFrames == 0) return;
     uint64_t latestUs = lastIrqUs;
     if (!cameraEpochQueued_) {
       queueCameraRecord(MouseHouseProtocolV2::MESSAGE_CAMERA_EPOCH, "Start",
@@ -1744,6 +1749,9 @@ bool MouseHouse::consumeFlag(bool& flag) {
 
 void MouseHouse::begin() {
   Serial.begin(115200);
+  while (!Serial) {
+    delay(10);
+  }
   transport_.begin(get_rand_64());
 
   if (!rtc_.begin()) {
