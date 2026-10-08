@@ -44,6 +44,53 @@ The environments share the reusable code in `src/MouseHouse.*`. The small
 `examples/`, so the Arduino IDE examples and PlatformIO builds use the same
 task source.
 
+### Recover a missing controller on Jetson USB-C
+
+If an upload fails because the board is missing from `lsusb` and
+`/dev/serial/by-id/`, the repository includes an on-demand recovery command.
+It uses the system Python standard library, requires no package installation,
+and installs no service or boot configuration. Run it only with the rig idle.
+This targets the tested Orin Nano USB-C role switch `usb2-0-role-switch` and
+USB device path `1-1`; it is not a general reset for arbitrary USB ports.
+
+From the repository directory, no arguments are needed:
+
+```sh
+# Optional read-only presence check (no sudo).
+bash tools/recover_usb.sh --check
+
+# If missing, recover the USB-C connection, then retry your selected upload.
+sudo bash tools/recover_usb.sh
+pio run -e fixed_ratio --target upload
+
+# Start the monitor separately after the upload completes.
+pio device monitor
+```
+
+The tool automatically looks for a Feather RP2040 Adalogger serial device.
+It returns 0 when one is present and nonzero on failure. If multiple controllers
+are visible, use the optional `--serial <serial>` flag to select one; the serial
+number is in its `/dev/serial/by-id/` name. To upload only after a successful
+check or recovery:
+
+```sh
+sudo bash tools/recover_usb.sh && pio run -e fixed_ratio --target upload
+```
+
+An already-present controller is left untouched. Otherwise the tool waits two
+seconds, then makes at most three `host -> none -> host` recovery attempts,
+waiting up to 15 seconds after each. It refuses to reset a port in another role
+or occupied by another device. It does not open the serial port, issue firmware
+commands, or reset the shared USB host controller. Presence means USB enumeration
+succeeded, not that firmware initialization or pre-run checks passed. Use this
+only for a missing device, while idle, not as an experiment-time watchdog.
+
+The implementation is also importable as `squeakview_firmware.usb_recovery`;
+privilege is still required for the host's USB role write. A manual role reset
+recovered a real cold-start failure on the test Jetson without replugging.
+Repeated cold-start validation of this packaged tool remains required before
+fleet deployment.
+
 ### Guided pre-deployment qualification
 
 Flash `setup_debug`. It runs an ordered qualification wizard and reports the
