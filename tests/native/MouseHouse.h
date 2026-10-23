@@ -1,11 +1,14 @@
 #pragma once
 #include "Arduino.h"
+#include <string>
 
 class MouseHouse {
 public:
   enum PelletSensorMode { PELLET_SENSOR_LATCHED_PRESENCE };
   enum TimeoutSignalMode { TIMEOUT_CLICK_PATTERN };
   bool running = false, feeding = false, jammed = false, rejectFeed = false;
+  bool cameraTriggers = true;
+  std::vector<std::string> loggedEvents;
   bool pellet = false, blocked = false, timeout = false;
   bool left = false, right = false, mainLight = false;
   bool leftLight = false, rightLight = false;
@@ -14,6 +17,7 @@ public:
   void begin() {}
   void update() {}
   bool isRunning() const { return running; }
+  bool cameraTriggersEnabled() const { return running && cameraTriggers; }
   bool isFeedActive() const { return feeding; }
   bool isFeedJammed() const { return jammed; }
   bool isPelletAvailable() const { return pellet; }
@@ -46,7 +50,9 @@ public:
   void clearMainStrip() { mainLight = false; }
   void leftPokeLightOff() { leftLight = false; }
   void rightPokeLightOff() { rightLight = false; }
-  template <typename... Args> void logEvent(Args...) {}
+  template <typename... Args> void logEvent(const char* event, Args...) {
+    loggedEvents.emplace_back(event);
+  }
   template <typename... Args> void playTone(Args...) {}
   template <typename... Args> void startTimeout(Args...) { timeout = true; }
   void setCompatibilitySerialMode(bool) {}

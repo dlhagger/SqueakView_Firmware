@@ -26,11 +26,20 @@ int main(int argc, char** argv) {
     assert(mh.feedStarts == 1);
     assert(rewardFeedCount == PHASE_1_PELLET_THRESH);
     assert(trainingPhase == PHASE_2_HOLD_CUE);
-  } else {
+  } else if (scenario == 1) {
     mh.rejectFeed = true;  // E.g. an integrity latch rejects a feed request.
     registerRewardFeedStart();
     assert(rewardFeedCount == PHASE_1_PELLET_THRESH - 1);
     assert(trainingPhase == PHASE_1_FR1 && mh.feedStarts == 0);
     assert(!rewardFeedStarting);
+  } else {
+    mh.cameraTriggers = scenario == 3;
+    handleSessionStart();
+    bool legacyAck = false;
+    for (const auto& event : mh.loggedEvents) {
+      if (event == "ACK_START") legacyAck = true;
+    }
+    assert(legacyAck == mh.cameraTriggers);
+    assert(sessionWasRunning);
   }
 }

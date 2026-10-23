@@ -527,8 +527,8 @@ class QualificationWindow(QMainWindow):
         if line.startswith("ERROR_NO_RTC") or line.startswith("STARTUP_FAULT,NO_RTC"):
             self.handshake_timer.stop()
             self._set_connection_issue(
-                "Controller startup stopped safely because the PCF8523 RTC was not detected. "
-                "Inspect RTC power and the I²C wiring."
+                "Controller startup stopped safely because the RTC was missing or could not be identified. "
+                "Inspect RTC power, the I²C wiring, and whether the chip is a supported PCF8523 or DS3231."
             )
         elif line.startswith("ERROR_NO_MPR121") or line.startswith("STARTUP_FAULT,NO_MPR121"):
             self.handshake_timer.stop()

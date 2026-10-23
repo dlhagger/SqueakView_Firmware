@@ -17,7 +17,7 @@ pio device monitor
 ```
 
 Its active poke alternates at America/New_York midnight using the validated
-PCF8523 calendar. The reference date and starting side are configured near the
+RTC calendar. The reference date and starting side are configured near the
 top of `examples/fixed_ratio/fixed_ratio.ino`; September 15, 2026 is currently
 a left-poke day, followed by a right-poke day. The selection is deterministic
 across resets. A midnight change waits for any active poke or feed to finish,
@@ -43,6 +43,41 @@ The environments share the reusable code in `src/MouseHouse.*`. The small
 `src/main.cpp` dispatcher includes the corresponding original sketch from
 `examples/`, so the Arduino IDE examples and PlatformIO builds use the same
 task source.
+
+### Automatic RTC detection
+
+The same firmware automatically detects an installed **PCF8523** or **DS3231**
+at startup, in both PlatformIO and Arduino builds. No RTC build flag or user
+selection is needed. Startup reports `RTC_TYPE,PCF8523` or `RTC_TYPE,DS3231`.
+
+The chips share I2C address `0x68`, so an address ACK alone cannot identify them.
+`src/AutoRtc.h` compares sequential register reads: the DS3231 pointer wraps
+after `0x12`, while the PCF8523 wraps after `0x13`. These behaviors are documented
+in the [DS3231 address map](https://www.analog.com/media/en/technical-documentation/data-sheets/ds3231.pdf)
+and [PCF8523 section 8.1](https://www.nxp.com/docs/en/data-sheet/PCF8523.pdf).
+Detection sets only the read pointer and never writes register data, resets the
+clock, or changes oscillator/calibration settings. It requires two consecutive
+matching probes, within four attempts, before initializing the selected driver.
+It does not rely on a valid calendar, so a lost-power RTC can still be identified
+and corrected through `SET_RTC`.
+
+Missing, failed, or ambiguous detection retains the safe `ERROR_NO_RTC` /
+`STARTUP_FAULT,NO_RTC` behavior and prevents clock writes. It never guesses a
+driver. This discriminates the two supported chips; it is not a universal RTC
+identifier. Only one RTC may occupy `0x68`.
+
+Both types use UTC, the same `TIME_SYNC` and `SET_RTC` commands, lost-power and
+invalid-date checks, monotonic event-time anchoring, and house-light/day
+scheduling. After changing the RTC, use the idle pre-run clock validation and
+correction procedure below.
+
+Software tests exercise detection, driver dispatch, failures, and the absence
+of register-data writes using simulated I2C. They do not validate electrical
+behavior. Before deployment, check automatic identification on both physical
+RTC types, startup with valid, invalid/lost-power, and missing RTC states;
+set and verify UTC against the Jetson; verify battery-backed time across power
+cycles; confirm `TIME_SYNC`/`SET_RTC` reject active sessions and feeds; and check
+house-light/day scheduling and continuous camera timing on the physical rig.
 
 ### Recover a missing controller on Jetson USB-C
 
@@ -211,7 +246,7 @@ SET_RTC,<unix_seconds>
 Both commands are pre-run operations and are rejected with `DEVICE_BUSY` while
 the session or feeder is active. `TIME_SYNC` is read-only, but it is still kept
 out of active experiments to avoid adding serial traffic during behavioral
-acquisition. If the PCF8523 reports lost power or an implausible date, `START`
+acquisition. If the detected RTC reports lost power or an implausible date, `START`
 is rejected with `NACK,START,RTC_INVALID` until the RTC is set. Event time
 remains based on the RP2040 monotonic clock throughout a running session.
 
@@ -277,7 +312,7 @@ Use `--set-rtc` only while the controller is stopped and reports `RTC_INVALID`.
 
 Startup waits for a USB serial connection before completing rig initialization.
 After initialization, transport output is queued without blocking acquisition.
-A missing PCF8523 RTC or MPR121 sensor queues `ERROR_NO_RTC` or
+A missing/unidentified RTC or missing MPR121 sensor queues `ERROR_NO_RTC` or
 `ERROR_NO_MPR121` and remains in a
 safe halted state. That state accepts only the qualification `TEST,HELLO` and
 `TEST,STATUS` diagnostics, repeats the fault as `STARTUP_FAULT,<reason>`, and
@@ -341,3 +376,92 @@ Included now:
 - `examples/fixed_ratio/fixed_ratio.ino`
 - `examples/go_nogo_automated/go_nogo_automated.ino`
 - `examples/setup_debug/setup_debug.ino`
+
+### Bottle swaps during a reliable session
+
+Firmware supports bottle-swap capability version 1. The host sends newline
+terminated `BOTTLE_STATUS`, `BOTTLE_PAUSE,<swap_id>`, and
+`BOTTLE_RESUME,<swap_id>` commands. IDs are 32 lowercase hexadecimal characters.
+Pause/resume require an active protocol-v2 session; status is also available
+before a session. Results and state transitions are reliable `COMMAND_RESULT`
+records containing:
+
+```
+BOTTLE_STATE,1,<id-or-none>,<ACTIVE|PAUSED|CALIBRATING|FAILED>,<left>,<right>,<monotonic_us>,<reason>
+```
+
+Counts and monotonic time are snapshots of the reported transition, including
+when retrieved through status queries or retries. Global lick totals continue
+through normal `DRINK_START` records. Both drink channels are suppressed while
+paused, calibrating, or failed; pokes, feeder, lights, session time, camera PIO,
+and other task services continue. An already-active contact is logged as
+`DRINK_INTERRUPTED`, with its existing global count, rather than a synthetic
+completed lick. Neither side's session counter resets. The host owns selected
+side, fluid, weights, bottle history, and per-bottle counter boundaries.
+
+Only one swap may be pending. Repeating its pause, repeating its resume while
+calibrating, or retrying the latest completed resume has no side effects. A new
+ID while a swap is pending is rejected. The host must serialize swaps and must
+never reuse a completed ID for a later swap. Resume from `FAILED` explicitly
+starts another calibration attempt for the same ID. Stopping cancels pending
+calibration, clears the ID, and emits `SESSION_STOPPED`; that response is never
+proof that a resume succeeded. Starting a new session clears swap state and
+session counters together.
+
+Calibration uses the MPR121's existing autoconfiguration on a stop-to-run
+transition. Threshold, autoconfiguration, and debounce configuration is written
+one register per service iteration. It waits at least 500 ms after entering run
+mode, then requires healthy register readback and both channels released for
+250 ms. A 10-second overall request deadline leaves both channels muted on failure.
+The periodic automatic health reset is suspended while a swap is pending.
+Before accepting subsequent lick edges, both channels must each be observed
+released, preventing stale contact edges from being counted.
+
+Compilation and native state-machine tests do not establish sensor readiness or
+electrical behavior. Physical acceptance requires left-only, right-only, and
+both-bottle swaps; different fluids; touch during calibration; missing/faulted
+MPR121; retry and stop during calibration; uninterrupted poke/feeding behavior;
+and a logic-analyzer check of continuous camera pulse width and period. Follow
+with a representative 24-hour run with repeated swaps. Do not use the initial
+settling/readiness constants as experimentally validated sensor guarantees.
+
+### Behavioral sessions with camera triggers disabled
+
+`START_BEHAVIOR` starts a normal behavioral session without enabling the camera
+TTL generator. It shares the RTC, startup-fault, integrity, and already-running
+checks used by `START,<fps>`, but does not require an available camera PIO state
+machine. Its canonical `ACK_START_BEHAVIOR` event has FPS/count and frame period
+both zero. Pokes, licks, feeding, task logic, global drink counters, and reliable
+bottle swaps operate normally. No `CAMERA_EPOCH`, `CAMERA_CHECKPOINT`, or
+`CAMERA_STOP` records are emitted for this mode. `STOP` leaves camera TTL LOW,
+shuts down any feed, and reports `ACK_STOP` with final frame count zero.
+
+Existing `START,<fps>` behavior and acknowledgement remain unchanged. A session
+cannot switch trigger modes while running; stop first, then start the requested
+mode. Each start clears prior camera IRQ counts, event counts, and bottle-swap
+state. Library users can call `startSession(0, false)` for behavioral mode and
+inspect `cameraTriggersEnabled()`; `isRunning()` is true for either mode.
+
+The native session test compiles the production start/stop/update/drain methods
+against observable hardware boundaries and verifies triggered → behavioral →
+triggered transitions, zero behavioral frame totals, no behavioral camera
+records, continued sensor polling, bottle-pause eligibility, and startup guards.
+Physical acceptance must additionally verify TTL remains LOW throughout a
+behavioral session and bottle swaps, then resumes normal timing in a subsequent
+triggered session. Compilation does not validate electrical behavior.
+
+Calibration failures retain both-channel muting and report a specific reason:
+`CAL_STOP_VERIFY_FAILED`, `CAL_REGISTER_VERIFY_FAILED`,
+`CAL_CHANNELS_NOT_RELEASED`, `CAL_SENSOR_HEALTH_TIMEOUT`, or
+`CAL_READINESS_TIMEOUT`. Each failure emits one reliable, safety-priority
+`BOTTLE_CAL_DIAG,1,...` diagnostic with the swap ID, stage, failing register,
+expected/actual value, configuration cursor, elapsed microseconds, and captured
+ECR/out-of-range/touch readings. Diagnostic values come from the original
+failing read or latest readiness sample; logging does not reread hardware.
+A Resume request allows up to three configuration attempts within the existing
+10-second overall deadline. Stop/register verification failures retry on a later
+service pass, with both lick channels muted and global counts unchanged. Each
+attempt logs its captured failure, attempt number, and whether it will retry.
+Persistent faults fail after the third attempt; held channels and readiness
+failures retain their original deadline and never bypass checks. A later manual
+resume starts a fresh bounded request.

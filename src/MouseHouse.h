@@ -9,6 +9,8 @@
 #include <hardware/pio.h>
 
 #include "SerialTransport.h"
+#include "BottleSwapState.h"
+#include "AutoRtc.h"
 
 class MouseHouse {
 public:
@@ -38,9 +40,10 @@ public:
   void begin();
   void update();
 
-  void startSession(uint32_t fps);
+  void startSession(uint32_t fps, bool triggerCamera = true);
   void stopSession();
   bool isRunning() const;
+  bool cameraTriggersEnabled() const;
   uint32_t fps() const;
   uint64_t framePeriodUs() const;
   uint64_t frameCounter() const;
@@ -165,13 +168,14 @@ private:
   static constexpr long kNotApplicable = 69420;
   static constexpr const char* kNanString = "nan";
 
-  RTC_PCF8523 rtc_;
+  AutoRtc rtc_;
   Adafruit_MPR121 cap_;
   Adafruit_NeoPixel strip_;
   Stepper stepper_;
 
   volatile uint32_t fps_ = 30;
   bool running_ = false;
+  bool cameraTriggersEnabled_ = false;
   bool sensorPollingWhileStopped_ = false;
 
   uint64_t baseUs_ = 0;
@@ -256,6 +260,26 @@ private:
   uint16_t houseLightOnMinuteOfDay_ = 5U * 60U;
   uint16_t houseLightOffMinuteOfDay_ = 17U * 60U;
   HouseLightTimeBasis houseLightTimeBasis_ = HOUSE_LIGHT_RTC_TIME;
+
+  BottleSwapState bottleSwap_;
+  bool leftDrinkNeedsRelease_ = false;
+  bool rightDrinkNeedsRelease_ = false;
+  uint64_t nextBottleCalibrationCheckUs_ = 0;
+  uint8_t bottleCalibrationRegister_ = 0;
+  static constexpr uint8_t kBottleCalibrationMaxAttempts = 3;
+  uint8_t bottleCalibrationAttempt_ = 0;
+  bool bottleCalibrationRetryPending_ = false;
+  bool bottleCalibrationSampled_ = false;
+  uint8_t bottleCalibrationEcr_ = 0;
+  uint8_t bottleCalibrationOorL_ = 0;
+  uint8_t bottleCalibrationOorH_ = 0;
+  uint16_t bottleCalibrationTouched_ = 0;
+  void failBottleCalibration(const char* reason, const char* stage,
+                             uint8_t reg, uint16_t expected, uint16_t actual);
+  void handleBottleCommand(const char* command);
+  void queueBottleState();
+  void muteDrinkEvents(const char* reason);
+  void serviceBottleCalibration();
 
   unsigned long lastMpr121Check_ = 0;
   unsigned long lastHouseLightCheck_ = 0;

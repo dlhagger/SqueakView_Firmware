@@ -429,6 +429,10 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
         }
       }
     }
+  } else if (strcmp(cmd, "BOTTLE_STATUS") == 0
+             || strncmp(cmd, "BOTTLE_PAUSE,", 13) == 0
+             || strncmp(cmd, "BOTTLE_RESUME,", 14) == 0) {
+    handleBottleCommand(cmd);
   } else if (strcmp(cmd, "TRANSPORT_STATUS") == 0) {
     queueTransportStatus();
   } else if (strncmp(cmd, "START,", 6) == 0) {
@@ -445,6 +449,16 @@ void MouseHouse::handleSerialCommand(const char* cmd) {
       sendCommandError("START", "ALREADY_RUNNING");
     } else {
       startSession((uint32_t)fps);
+    }
+  } else if (strcmp(cmd, "START_BEHAVIOR") == 0) {
+    if (transport_.overflowLatched()) {
+      sendCommandError("START_BEHAVIOR", "INTEGRITY_LATCHED");
+    } else if (!rtcValid_) {
+      sendCommandError("START_BEHAVIOR", "RTC_INVALID");
+    } else if (running_) {
+      sendCommandError("START_BEHAVIOR", "ALREADY_RUNNING");
+    } else {
+      startSession(0, false);
     }
   } else if (strcmp(cmd, "STOP") == 0) {
     stopSession();
@@ -588,7 +602,203 @@ bool MouseHouse::mpr121Faulted() {
   return (oorL | oorH) != 0;
 }
 
+void MouseHouse::queueBottleState() {
+  if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
+                 SerialTransport::PRIORITY_SAFETY,
+                 "BOTTLE_STATE,1,%s,%s,%lu,%lu,%llu,%s",
+                 bottleSwap_.id[0] ? bottleSwap_.id : "none", bottleSwap_.name(),
+                 (unsigned long)bottleSwap_.left, (unsigned long)bottleSwap_.right,
+                 (unsigned long long)bottleSwap_.boundaryUs, bottleSwap_.reason)) {
+    noteRequiredRecordFailure("BOTTLE_STATE", time_us_64());
+  }
+}
+
+void MouseHouse::muteDrinkEvents(const char* reason) {
+  TimedBinaryEvent* events[] = {&leftDrinkEvent_, &rightDrinkEvent_};
+  const char* sides[] = {"LD", "RD"};
+  for (unsigned i = 0; i < 2; ++i) {
+    TimedBinaryEvent& event = *events[i];
+    if (event.previousState) {
+      logEvent("DRINK_INTERRUPTED", getTimestampUs(), time_us_64(), sides[i],
+               event.count, kNotApplicable, kNotApplicable, kNotApplicable,
+               getContext(), reason);
+    }
+    primeTimedBinaryEvent(event, false, 0);
+  }
+  leftDrinkNeedsRelease_ = rightDrinkNeedsRelease_ = true;
+}
+
+void MouseHouse::handleBottleCommand(const char* command) {
+  if (strcmp(command, "BOTTLE_STATUS") == 0) {
+    queueBottleState();
+    return;
+  }
+  bool pause = strncmp(command, "BOTTLE_PAUSE,", 13) == 0;
+  const char* id = command + (pause ? 13 : 14);
+  const char* label = pause ? "BOTTLE_PAUSE" : "BOTTLE_RESUME";
+  if (!BottleSwapState::validId(id)) {
+    sendCommandError(label, "INVALID_SWAP_ID");
+    return;
+  }
+  if (!running_ || transport_.mode() != SerialTransport::PROTOCOL_V2_ACTIVE
+      || transport_.overflowLatched()) {
+    sendCommandError(label, "REQUIRES_ACTIVE_RELIABLE_SESSION");
+    return;
+  }
+  BottleSwapState::Request result = pause
+      ? bottleSwap_.pause(id, time_us_64(), leftDrinkEvent_.count, rightDrinkEvent_.count)
+      : bottleSwap_.resume(id, time_us_64(), leftDrinkEvent_.count, rightDrinkEvent_.count);
+  if (result == BottleSwapState::REJECT) {
+    sendCommandError(label, "SWAP_ID_OR_STATE_CONFLICT");
+    return;
+  }
+  if (result == BottleSwapState::TRANSITION) {
+    muteDrinkEvents("BottleSwap");
+    if (!pause) {
+      // Autoconfiguration runs on Stop -> Run (Adafruit_MPR121::setAutoconfig).
+      // Keep all writes in stop mode and settle in later service iterations.
+      cap_.writeRegister(MPR121_ECR, 0x00);
+      bottleCalibrationRegister_ = 0;
+      bottleCalibrationAttempt_ = 1;
+      bottleCalibrationRetryPending_ = false;
+      bottleCalibrationSampled_ = false;
+      bottleCalibrationEcr_ = bottleCalibrationOorL_ = bottleCalibrationOorH_ = 0;
+      bottleCalibrationTouched_ = 0;
+      nextBottleCalibrationCheckUs_ = 0;
+    }
+  }
+  queueBottleState();
+}
+
+void MouseHouse::failBottleCalibration(const char* reason, const char* stage,
+                                        uint8_t reg, uint16_t expected,
+                                        uint16_t actual) {
+  uint64_t now = time_us_64();
+  uint64_t elapsed = now - bottleSwap_.boundaryUs;
+  bool retryable = strcmp(reason, "CAL_STOP_VERIFY_FAILED") == 0
+                   || strcmp(reason, "CAL_REGISTER_VERIFY_FAILED") == 0;
+  bool retrying = retryable
+                  && bottleCalibrationAttempt_ < kBottleCalibrationMaxAttempts
+                  && elapsed < BottleSwapState::kDeadlineUs;
+  bottleCalibrationRetryPending_ = retrying;
+  if (!retrying) {
+    bottleSwap_.fail(now, leftDrinkEvent_.count, rightDrinkEvent_.count, reason);
+    queueBottleState();
+  }
+  // Use the captured failing read, never a later I2C reread. Attempts remain
+  // muted, share one overall deadline, and each produce one durable diagnostic.
+  if (!queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+                 SerialTransport::PRIORITY_SAFETY,
+                 "BOTTLE_CAL_DIAG,1,%s,%s,register=0x%02x,expected=0x%04x,"
+                 "actual=0x%04x,cursor=%u,elapsed_us=%llu,ecr=0x%02x,"
+                 "oor=0x%02x%02x,touched=0x%04x,attempt=%u,retrying=%u",
+                 bottleSwap_.id, stage, (unsigned)reg, (unsigned)expected,
+                 (unsigned)actual, (unsigned)bottleCalibrationRegister_,
+                 (unsigned long long)elapsed, (unsigned)bottleCalibrationEcr_,
+                 (unsigned)bottleCalibrationOorH_, (unsigned)bottleCalibrationOorL_,
+                 (unsigned)bottleCalibrationTouched_,
+                 (unsigned)bottleCalibrationAttempt_, (unsigned)retrying)) {
+    noteRequiredRecordFailure("BOTTLE_CAL_DIAG", now);
+  }
+}
+
+void MouseHouse::serviceBottleCalibration() {
+  if (bottleSwap_.state != BottleSwapState::CALIBRATING) return;
+  uint64_t now = time_us_64();
+  if (now - bottleSwap_.boundaryUs >= BottleSwapState::kDeadlineUs) {
+    const char* reason = "CAL_READINESS_TIMEOUT";
+    uint8_t reg = MPR121_ECR;
+    uint16_t expected = 0x8C, actual = bottleCalibrationEcr_;
+    if (bottleCalibrationSampled_) {
+      if (bottleCalibrationEcr_ != 0x8C) {
+        reason = "CAL_SENSOR_HEALTH_TIMEOUT";
+      } else if (bottleCalibrationOorL_ || bottleCalibrationOorH_) {
+        reason = "CAL_SENSOR_HEALTH_TIMEOUT";
+        reg = bottleCalibrationOorL_ ? 0x02 : 0x03;
+        expected = 0;
+        actual = bottleCalibrationOorL_ ? bottleCalibrationOorL_ : bottleCalibrationOorH_;
+      } else if (bottleCalibrationTouched_ & ((1 << 1) | (1 << 2))) {
+        reason = "CAL_CHANNELS_NOT_RELEASED";
+        reg = 0x00;
+        expected = 0;
+        actual = bottleCalibrationTouched_;
+      }
+    }
+    failBottleCalibration(reason, "READINESS", reg, expected, actual);
+    return;
+  }
+  if (bottleCalibrationRetryPending_) {
+    // Retry only on a later service pass. Reassert Stop Mode and reverify all
+    // configuration instead of accepting a stale/failed read as readiness.
+    cap_.writeRegister(MPR121_ECR, 0x00);
+    bottleCalibrationRetryPending_ = false;
+    ++bottleCalibrationAttempt_;
+    bottleCalibrationRegister_ = 0;
+    bottleCalibrationSampled_ = false;
+    bottleCalibrationEcr_ = bottleCalibrationOorL_ = bottleCalibrationOorH_ = 0;
+    bottleCalibrationTouched_ = 0;
+    nextBottleCalibrationCheckUs_ = 0;
+    return;
+  }
+  // One bounded register write per update; never delay or call begin() here.
+  // Retain the established filters and configure the same autoconfig,
+  // thresholds, and debounce as configureMPR121Silent().
+  if (bottleCalibrationRegister_ < 30) {
+    uint8_t index = bottleCalibrationRegister_++;
+    // A confirmed stop is necessary: otherwise there is no guaranteed fresh
+    // Stop -> Run edge and autoconfiguration may never have been triggered.
+    if (index == 0) {
+      uint8_t actual = cap_.readRegister8(MPR121_ECR);
+      bottleCalibrationEcr_ = actual;
+      if (actual != 0) {
+        failBottleCalibration("CAL_STOP_VERIFY_FAILED", "STOP_VERIFY",
+                              MPR121_ECR, 0, actual);
+        return;
+      }
+    }
+    static const uint8_t registers[] = {
+        0x7B, 0x7D, 0x7F, 0x7E, MPR121_DEBOUNCE, MPR121_ECR};
+    static const uint8_t values[] = {0x0B, 200, 180, 130, 0, 0x8C};
+    uint8_t reg = index < 24 ? MPR121_TOUCHTH_0 + index : registers[index - 24];
+    uint8_t value = index < 24 ? (index % 2 ? 0 : 2) : values[index - 24];
+    cap_.writeRegister(reg, value);
+    uint8_t actual = cap_.readRegister8(reg);
+    if (reg == MPR121_ECR) bottleCalibrationEcr_ = actual;
+    if (actual != value) {
+      failBottleCalibration("CAL_REGISTER_VERIFY_FAILED", "REGISTER_VERIFY",
+                            reg, value, actual);
+      return;
+    }
+    if (index == 29) {
+      nextBottleCalibrationCheckUs_ = time_us_64() + BottleSwapState::kSettleUs;
+    }
+    return;
+  }
+  if (now < nextBottleCalibrationCheckUs_) return;
+  nextBottleCalibrationCheckUs_ = now + 10000ULL;
+  // Exact readback detects absent/reset devices as well as stopped electrodes.
+  bottleCalibrationEcr_ = cap_.readRegister8(MPR121_ECR);
+  bottleCalibrationOorL_ = cap_.readRegister8(0x02);
+  bottleCalibrationOorH_ = cap_.readRegister8(0x03);
+  bottleCalibrationTouched_ = cap_.touched();
+  bottleCalibrationSampled_ = true;
+  bool healthy = bottleCalibrationEcr_ == 0x8C
+                 && !(bottleCalibrationOorL_ | bottleCalibrationOorH_);
+  bool released = (bottleCalibrationTouched_ & ((1 << 1) | (1 << 2))) == 0;
+  if (bottleSwap_.service(now, healthy, released,
+                         leftDrinkEvent_.count, rightDrinkEvent_.count)) {
+    if (bottleSwap_.state == BottleSwapState::ACTIVE) {
+      // Readiness already proved both channels released continuously. Accept
+      // their next real edge, including one immediately after this boundary.
+      leftDrinkNeedsRelease_ = rightDrinkNeedsRelease_ = false;
+    }
+    lastMpr121Check_ = millis();
+    queueBottleState();
+  }
+}
+
 void MouseHouse::checkMPR121Health() {
+  if (bottleSwap_.state != BottleSwapState::ACTIVE) return;
   unsigned long nowMs = millis();
   if (nowMs - lastMpr121Check_ >= kMpr121CheckIntervalMs) {
     lastMpr121Check_ = nowMs;
@@ -768,7 +978,12 @@ void MouseHouse::updatePelletWell() {
 }
 
 void MouseHouse::updateLeftDrink() {
+  if (bottleSwap_.state != BottleSwapState::ACTIVE) return;
   bool currentState = cap_.touched() & (1 << 1);
+  if (leftDrinkNeedsRelease_) {
+    if (!currentState) leftDrinkNeedsRelease_ = false;
+    return;
+  }
   uint64_t nowUnix = getTimestampUs();
   uint64_t nowUs = time_us_64();
 
@@ -778,7 +993,12 @@ void MouseHouse::updateLeftDrink() {
 }
 
 void MouseHouse::updateRightDrink() {
+  if (bottleSwap_.state != BottleSwapState::ACTIVE) return;
   bool currentState = cap_.touched() & (1 << 2);
+  if (rightDrinkNeedsRelease_) {
+    if (!currentState) rightDrinkNeedsRelease_ = false;
+    return;
+  }
   uint64_t nowUnix = getTimestampUs();
   uint64_t nowUs = time_us_64();
 
@@ -1532,7 +1752,7 @@ void MouseHouse::cameraPioIrqHandler() {
 }
 
 void MouseHouse::startCameraPio() {
-  if (!cameraPioReady_) return;
+  if (!cameraPioReady_ || !cameraTriggersEnabled_) return;
 
   stopCameraPio();
   cameraIrqFrameCount_ = 0;
@@ -1584,7 +1804,7 @@ void MouseHouse::stopCameraPio() {
 }
 
 void MouseHouse::drainCameraEvents() {
-  if (!running_) return;
+  if (!running_ || !cameraTriggersEnabled_) return;
 
   uint32_t observedFrames = 0;
   uint64_t firstIrqUs = 0;
@@ -1672,13 +1892,19 @@ void MouseHouse::applyIntegrityFailSafe() {
   integrityFailSafePending_ = false;
   integrityFailSafeApplied_ = true;
 
-  bool cameraWasRunning = running_;
+  bool cameraWasRunning = running_ && cameraTriggersEnabled_;
+  // Do not perform sensor I/O or enqueue extra records before safety shutdown.
+  if (bottleSwap_.state != BottleSwapState::ACTIVE) {
+    bottleSwap_.fail(time_us_64(), leftDrinkEvent_.count, rightDrinkEvent_.count,
+                     "INTEGRITY_FAILURE");
+  }
   running_ = false;
   stopCameraPio();
+  cameraTriggersEnabled_ = false;
   uint32_t finalFrames = 0;
   uint64_t firstFrameUs = 0;
   uint64_t finalFrameUs = 0;
-  snapshotCameraIrq(finalFrames, firstFrameUs, finalFrameUs);
+  if (cameraWasRunning) snapshotCameraIrq(finalFrames, firstFrameUs, finalFrameUs);
   if (finalFrames == 0) finalFrameUs = time_us_64();
   frameCounter_ = finalFrames;
 
@@ -1727,6 +1953,7 @@ void MouseHouse::updateBackgroundServices() {
   serviceIntegrityReports();
   serviceFeed();
   serviceIndicatorRefresh();
+  serviceBottleCalibration();
   checkMPR121Health();
   updateTone();
   updateClickPattern();
@@ -1762,6 +1989,10 @@ void MouseHouse::begin() {
       transport_.serviceOutput();
     }
   }
+
+  queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC,
+            SerialTransport::PRIORITY_DIAGNOSTIC,
+            "RTC_TYPE,%s", rtc_.typeName());
 
   bool rtcLostPower = rtc_.lostPower();
   if (rtcLostPower) {
@@ -1829,14 +2060,21 @@ void MouseHouse::begin() {
                  (rtcDatePlausible ? "Boot" : "ImplausibleDate"));
 }
 
-void MouseHouse::startSession(uint32_t fps) {
-  if (fps == 0 || fps > 120 || !rtcValid_ || !cameraPioReady_
-      || transport_.overflowLatched()) return;
+void MouseHouse::startSession(uint32_t fps, bool triggerCamera) {
+  if (running_ || !rtcValid_ || transport_.overflowLatched()
+      || (triggerCamera && (fps == 0 || fps > 120 || !cameraPioReady_))) return;
 
+  // Begin every mode with TTL inactive, including after a prior triggered run.
+  stopCameraPio();
+  cameraTriggersEnabled_ = triggerCamera;
+  cameraIrqFrameCount_ = 0;
+  cameraFirstIrqUs_ = 0;
+  cameraLastIrqUs_ = 0;
+  cameraLoggedFrameCount_ = 0;
   configureMPR121Silent();
   clearTimeoutState();
 
-  fps_ = fps;
+  fps_ = triggerCamera ? fps : 0;
   sessionId_++;
   if (sessionId_ == 0) sessionId_ = 1;
   running_ = true;
@@ -1844,16 +2082,18 @@ void MouseHouse::startSession(uint32_t fps) {
   cameraEpochQueued_ = false;
   nextCameraCheckpointUs_ = 0;
   resetSessionEventCounts();
+  bottleSwap_.reset(time_us_64(), 0, 0);
+  leftDrinkNeedsRelease_ = rightDrinkNeedsRelease_ = false;
   syncBehavioralStateToSensors(getTimestampUs());
 
-  framePeriodUs_ = 1000000ULL / fps_;
-  startCameraPio();
+  framePeriodUs_ = triggerCamera ? 1000000ULL / fps_ : 0;
+  if (triggerCamera) startCameraPio();
 
-  if (!compatibilitySerialMode_) {
+  if (!compatibilitySerialMode_ || !triggerCamera) {
     uint64_t nowUnix = getTimestampUs();
     uint64_t nowUs = time_us_64();
 
-    logEvent("ACK_START",
+    logEvent(triggerCamera ? "ACK_START" : "ACK_START_BEHAVIOR",
              nowUnix, nowUs,
              kNanString,
              fps_,
@@ -1866,23 +2106,34 @@ void MouseHouse::startSession(uint32_t fps) {
 }
 
 void MouseHouse::stopSession() {
-  bool wasRunning = running_;
+  bool wasCameraTriggering = running_ && cameraTriggersEnabled_;
   if (feedActive_) {
     feedStop("StopCommand");
     feedRetryCount_ = 0;
   }
 
-  running_ = false;
+  // Disable triggers and capture the final boundary before any sensor I/O.
   stopCameraPio();
+  cameraTriggersEnabled_ = false;
   uint32_t finalFrames = 0;
   uint64_t firstFrameUs = 0;
   uint64_t lastFrameUs = 0;
-  snapshotCameraIrq(finalFrames, firstFrameUs, lastFrameUs);
+  if (wasCameraTriggering) snapshotCameraIrq(finalFrames, firstFrameUs, lastFrameUs);
   frameCounter_ = finalFrames;
   if (finalFrames == 0) lastFrameUs = time_us_64();
+
+  if (bottleSwap_.id[0]) {
+    // A stop during calibration must not leave the device in hardware stop mode.
+    cap_.writeRegister(MPR121_ECR, 0x8C);
+    muteDrinkEvents("SessionStopped");
+    bottleSwap_.reset(time_us_64(), leftDrinkEvent_.count, rightDrinkEvent_.count);
+    bottleSwap_.reason = "SESSION_STOPPED";
+    queueBottleState();
+  }
+  running_ = false;
   clearTimeoutState();
 
-  if (wasRunning && transport_.v2EnabledOrPending()) {
+  if (wasCameraTriggering && transport_.v2EnabledOrPending()) {
     queueCameraRecord(MouseHouseProtocolV2::MESSAGE_CAMERA_STOP,
                       "StopCommand", SerialTransport::PRIORITY_SAFETY,
                       (uint32_t)frameCounter_, lastFrameUs);
@@ -1920,6 +2171,10 @@ void MouseHouse::update() {
 
 bool MouseHouse::isRunning() const {
   return running_;
+}
+
+bool MouseHouse::cameraTriggersEnabled() const {
+  return running_ && cameraTriggersEnabled_;
 }
 
 uint32_t MouseHouse::fps() const {

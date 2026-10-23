@@ -19,13 +19,49 @@ class NativeFirmwareTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.build = Path(cls.temporary.name)
-        for name in ("replay", "qualification", "go_nogo"):
+        source = (ROOT / "src/MouseHouse.cpp").read_text()
+        methods = []
+        for signature in (
+            "void MouseHouse::startSession(", "void MouseHouse::stopSession()",
+            "void MouseHouse::update()", "void MouseHouse::drainCameraEvents()",
+            "bool MouseHouse::cameraTriggersEnabled() const",
+        ):
+            start = source.index(signature)
+            opening = source.index("{", start)
+            depth = 1
+            closing = opening + 1
+            while depth:
+                depth += (source[closing] == "{") - (source[closing] == "}")
+                closing += 1
+            methods.append(source[start:closing])
+        (cls.build / "session_methods.inc").write_text("\n".join(methods))
+        methods = []
+        for signature in (
+            "void MouseHouse::handleBottleCommand(",
+            "void MouseHouse::serviceBottleCalibration()",
+            "void MouseHouse::failBottleCalibration(",
+            "void MouseHouse::queueBottleState()", "void MouseHouse::muteDrinkEvents(",
+            "void MouseHouse::stopSession()",
+        ):
+            start = source.index(signature)
+            opening = source.index("{", start)
+            depth = 1
+            closing = opening + 1
+            while depth:
+                depth += (source[closing] == "{") - (source[closing] == "}")
+                closing += 1
+            methods.append(source[start:closing])
+        (cls.build / "calibration_methods.inc").write_text("\n".join(methods))
+        for name in ("replay", "qualification", "go_nogo", "bottle_swap", "rtc", "behavior_session", "bottle_calibration"):
             command = [
                 "g++", "-std=c++17", "-Wall", "-Wextra",
-                f"-I{NATIVE}", f"-I{ROOT / 'src'}", str(NATIVE / f"{name}.cpp"),
+                f"-I{NATIVE}", f"-I{ROOT / 'src'}", f"-I{cls.build}",
+                str(NATIVE / f"{name}.cpp"),
             ]
             if name == "replay":
                 command.append(str(ROOT / "src/SerialTransport.cpp"))
+            if name == "rtc":
+                command.insert(1, f"-I{NATIVE / 'rtc'}")
             result = subprocess.run(command + ["-o", str(cls.build / name)],
                                     capture_output=True, text=True)
             if result.returncode:
@@ -57,3 +93,22 @@ class NativeFirmwareTests(unittest.TestCase):
 
     def test_rejected_feed_does_not_advance_training(self):
         self.run_native("go_nogo", 1)
+
+    def test_bottle_swap_retries_calibration_and_counter_boundaries(self):
+        self.run_native("bottle_swap", 0)
+
+    def test_rtc_detection_dispatch_and_fail_closed_without_register_writes(self):
+        for scenario in range(14):
+            with self.subTest(scenario=scenario):
+                self.run_native("rtc", scenario)
+
+    def test_production_session_modes_keep_behavior_running_without_camera_records(self):
+        self.run_native("behavior_session", 0)
+
+    def test_go_nogo_only_emits_legacy_start_ack_for_triggered_sessions(self):
+        for scenario in (2, 3):
+            with self.subTest(scenario=scenario):
+                self.run_native("go_nogo", scenario)
+
+    def test_production_calibration_register_failures_readiness_and_manual_retry(self):
+        self.run_native("bottle_calibration", 0)

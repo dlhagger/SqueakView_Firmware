@@ -826,15 +826,19 @@ void handleSessionStart() {
            getPokeContext(),
            "StartToggle");
 
-  logEvent("ACK_START",
-           get_timestamp_us(), time_us_64(),
-           NAN_STR,
-           mh.fps(),
-           mh.framePeriodUs(),
-           NAN_INT,
-           NAN_INT,
-           getPokeContext(),
-           NAN_STR);
+  // Behavioral-only acknowledgement is emitted by MouseHouse even in
+  // compatibility mode. This sketch owns only the legacy triggered ACK.
+  if (mh.cameraTriggersEnabled()) {
+    logEvent("ACK_START",
+             get_timestamp_us(), time_us_64(),
+             NAN_STR,
+             mh.fps(),
+             mh.framePeriodUs(),
+             NAN_INT,
+             NAN_INT,
+             getPokeContext(),
+             NAN_STR);
+  }
 
   set_trial_available_on();
   logTrialAvailabilityDebug("Start");

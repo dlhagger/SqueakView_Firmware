@@ -106,8 +106,8 @@ def collect_burst(
 
 
 def set_rtc_from_host(port: Any) -> str:
-    # The PCF8523 stores whole seconds. Rounding limits the initial quantization
-    # error to roughly half a second before serial and I2C latency.
+    # Both supported RTCs store whole seconds. Rounding limits the initial
+    # quantization error to roughly half a second before serial and I2C latency.
     epoch_seconds = int(time.time() + 0.5)
     port.write(f"SET_RTC,{epoch_seconds}\n".encode())
     return wait_for(port, "ACK_SET_RTC,")[0]
