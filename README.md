@@ -413,7 +413,39 @@ transition. Threshold, autoconfiguration, and debounce configuration is written
 one register per service iteration. It waits at least 500 ms after entering run
 mode, then requires healthy register readback and both channels released for
 250 ms. A 10-second overall request deadline leaves both channels muted on failure.
-The periodic automatic health reset is suspended while a swap is pending.
+Automatic recovery is suspended while a swap is pending. Startup and automatic
+recovery use the same configuration values and readiness conditions, with a
+nonblocking software reset before automatic configuration. Both paths restore
+the driver's existing baseline/filter settings, thresholds 2/0, debounce 0/0,
+and autoconfiguration plus automatic reconfiguration. No pin assignments or
+feeder/LED sequencing change.
+
+While recording, a health scan starts once per second and reads one register per
+service iteration. Out-of-range flags, configuration mismatches, or either lick
+contact remaining touched for 5 seconds automatically start recovery. The task
+sketch can override that last limit with
+`mh.setLickRecoveryTouchTimeoutMs(5000)` (100–600,000 ms accepted). Low lick totals
+alone never trigger a reset. The touch limit is an initial policy, not a measured
+maximum drinking-contact duration.
+
+Recovery pauses both lick channels, preserves session counters, verifies Stop
+Mode, issues a software reset, waits 3 ms without blocking, verifies reset state,
+and restores configuration one register per service iteration. It then waits
+500 ms after Run Mode and requires both contacts released continuously for
+250 ms. Each attempt has a 10-second deadline, with a 5-second cooldown between
+attempts/recoveries and at most three attempts per 60-second budget window,
+including successful attempts. Exhaustion leaves lick sensing unavailable until
+an explicit successful bottle recalibration or a new recording session. Camera
+PIO, pokes, feeding, and task services continue. Stop cancels pending recovery.
+
+`LICK_RECOVERY_START`, `ATTEMPT`, `RETRY`, `READY`, `FAILED`, and `STOPPED` events
+use the normal ten-column event format (all names have the `LICK_RECOVERY_`
+prefix), once per side. `count` is the preserved absolute side count, `duration`
+is the observation-gap duration in microseconds, `latency` is the attempt count,
+and `value` is the recovery ID. Failed gaps remain open until recovery or Stop.
+`MPR121_DIAG` records capture before/after touch bits, filtered values, baselines,
+fault flags, and failing-register readback. The host saves these in `sensors.csv`;
+automatic recovery never creates a bottle swap ID or replaces a bottle.
 Before accepting subsequent lick edges, both channels must each be observed
 released, preventing stale contact edges from being counted.
 

@@ -42,6 +42,12 @@ class NativeFirmwareTests(unittest.TestCase):
             "void MouseHouse::failBottleCalibration(",
             "void MouseHouse::queueBottleState()", "void MouseHouse::muteDrinkEvents(",
             "void MouseHouse::stopSession()",
+            "void MouseHouse::beginLickRecovery(", "void MouseHouse::serviceLickRecovery()",
+            "void MouseHouse::reportLickRecovery(", "void MouseHouse::reportLickRecoveryDiagnostic(",
+            "void MouseHouse::cancelLickRecovery()",
+            "void MouseHouse::checkMPR121Health()", "void MouseHouse::setLickRecoveryTouchTimeoutMs(",
+            "void MouseHouse::updateLeftDrink()", "void MouseHouse::updateRightDrink()",
+            "void MouseHouse::updateTimedBinaryEvent(",
         ):
             start = source.index(signature)
             opening = source.index("{", start)
@@ -68,8 +74,9 @@ class NativeFirmwareTests(unittest.TestCase):
                 raise RuntimeError(result.stderr)
 
     def run_native(self, name, argument):
-        return subprocess.run([str(self.build / name), str(argument)], check=True,
-                              capture_output=True).stdout
+        result = subprocess.run([str(self.build / name), str(argument)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        return result.stdout
 
     def test_ack_and_slot_reuse_during_partial_replay(self):
         for ack in (0, 1, 32, 64):

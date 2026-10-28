@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "BottleSwapState.h"
+#include "LickRecovery.h"
 
 uint64_t testUs = 100;
 uint64_t time_us_64() { return testUs++; }
@@ -44,6 +45,9 @@ public:
   struct Event { unsigned long count=0; } leftDrinkEvent_, rightDrinkEvent_;
   struct Cap { void writeRegister(int, int) {} } cap_;
   BottleSwapState bottleSwap_;
+  LickRecovery lickRecovery_;
+  void beginLickRecovery(const char*) {}
+  void cancelLickRecovery() {}
   SerialTransport transport_;
   std::vector<std::string> events;
   std::vector<uint32_t> eventCounts;

@@ -10,6 +10,7 @@
 
 #include "SerialTransport.h"
 #include "BottleSwapState.h"
+#include "LickRecovery.h"
 #include "AutoRtc.h"
 
 class MouseHouse {
@@ -101,6 +102,8 @@ public:
   PelletSensorMode pelletSensorMode() const;
   void setSensorPollingWhileStopped(bool enabled);
   bool sensorPollingWhileStopped() const;
+  // Override in the task sketch if a different sustained-contact limit is needed.
+  void setLickRecoveryTouchTimeoutMs(uint32_t milliseconds);
 
   void setMainStrip(uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0);
   void clearMainStrip();
@@ -160,7 +163,7 @@ private:
   static constexpr uint64_t kFeedRetryStepDelayUs = 5000ULL;
   static constexpr uint64_t kNeoPixelPowerSettleUs = 2000ULL;
   static constexpr int kMaxFeedRetries = 3;
-  static constexpr unsigned long kMpr121CheckIntervalMs = 60000UL;
+  static constexpr unsigned long kMpr121CheckIntervalMs = 1000UL;
   static constexpr size_t kSerialCmdBufferSize = 96;
   static constexpr int kMaxFeedCommandSteps = 100000;
   static constexpr unsigned long kHouseLightCheckIntervalMs = 1000UL;
@@ -282,6 +285,18 @@ private:
   void serviceBottleCalibration();
 
   unsigned long lastMpr121Check_ = 0;
+  LickRecovery lickRecovery_;
+  uint64_t lickTouchSinceUs_[2] = {0, 0};
+  unsigned long lickRecoveryEndCounts_[2] = {0, 0};
+  uint64_t lickRecoveryTouchTimeoutUs_ = 5000000ULL;
+  bool mprHealthScanning_ = false;
+  uint8_t mprHealthCursor_ = 0;
+  void beginLickRecovery(const char* reason, uint8_t reg = 0,
+                         uint16_t expected = 0, uint16_t actual = 0);
+  void serviceLickRecovery();
+  void reportLickRecovery(const char* eventType, const char* reason);
+  void reportLickRecoveryDiagnostic(const char* stage);
+  void cancelLickRecovery();
   unsigned long lastHouseLightCheck_ = 0;
 
   bool rtcValid_ = false;
@@ -330,9 +345,7 @@ private:
   void dumpRegs();
   void configureMPR121();
   void configureMPR121Silent();
-  void resetMPR121();
   void checkMPR121Health();
-  bool mpr121Faulted();
 
   void updateTimedBinaryEvent(TimedBinaryEvent& event,
                               bool currentState,

@@ -120,6 +120,7 @@ void MouseHouse::logEvent(const char* eventType,
 
   SerialTransport::Priority priority = SerialTransport::PRIORITY_EVENT;
   if (strcmp(event.eventType, "FEED_JAM") == 0
+      || strncmp(event.eventType, "LICK_RECOVERY_", 14) == 0
       || strcmp(event.eventType, "ACK_STOP") == 0) {
     priority = SerialTransport::PRIORITY_SAFETY;
   }
@@ -577,31 +578,6 @@ void MouseHouse::configureMPR121Silent() {
   setDebounce(0, 0);
 }
 
-void MouseHouse::resetMPR121() {
-  emitLegacyLine("MPR121_RESET_BEGIN");
-  cap_.writeRegister(0x80, 0x63);
-  delay(1);
-  delay(2);
-
-  if (!cap_.begin(0x5A)) {
-    emitLegacyLine("MPR121_RESET_FAIL: begin()");
-    return;
-  }
-
-  configureMPR121();
-  dumpRegs();
-  emitLegacyLine("MPR121_RESET_OK");
-}
-
-bool MouseHouse::mpr121Faulted() {
-  uint8_t ecr = cap_.readRegister8(MPR121_ECR);
-  if (ecr == 0x00) return true;
-
-  uint8_t oorL = cap_.readRegister8(0x02);
-  uint8_t oorH = cap_.readRegister8(0x03);
-  return (oorL | oorH) != 0;
-}
-
 void MouseHouse::queueBottleState() {
   if (!queueText(MouseHouseProtocolV2::MESSAGE_COMMAND_RESULT,
                  SerialTransport::PRIORITY_SAFETY,
@@ -631,6 +607,9 @@ void MouseHouse::muteDrinkEvents(const char* reason) {
 void MouseHouse::handleBottleCommand(const char* command) {
   if (strcmp(command, "BOTTLE_STATUS") == 0) {
     queueBottleState();
+    const char* event = lickRecovery_.available() ? "LICK_RECOVERY_READY" :
+        lickRecovery_.state == LickRecovery::FAILED ? "LICK_RECOVERY_FAILED" : "LICK_RECOVERY_START";
+    reportLickRecovery(event, lickRecovery_.reason);
     return;
   }
   bool pause = strncmp(command, "BOTTLE_PAUSE,", 13) == 0;
@@ -643,6 +622,10 @@ void MouseHouse::handleBottleCommand(const char* command) {
   if (!running_ || transport_.mode() != SerialTransport::PROTOCOL_V2_ACTIVE
       || transport_.overflowLatched()) {
     sendCommandError(label, "REQUIRES_ACTIVE_RELIABLE_SESSION");
+    return;
+  }
+  if (lickRecovery_.busy()) {
+    sendCommandError(label, "SENSOR_RECOVERY_ACTIVE");
     return;
   }
   BottleSwapState::Request result = pause
@@ -743,7 +726,7 @@ void MouseHouse::serviceBottleCalibration() {
   // One bounded register write per update; never delay or call begin() here.
   // Retain the established filters and configure the same autoconfig,
   // thresholds, and debounce as configureMPR121Silent().
-  if (bottleCalibrationRegister_ < 30) {
+  if (bottleCalibrationRegister_ < LickRecovery::kRegisterCount) {
     uint8_t index = bottleCalibrationRegister_++;
     // A confirmed stop is necessary: otherwise there is no guaranteed fresh
     // Stop -> Run edge and autoconfiguration may never have been triggered.
@@ -756,11 +739,8 @@ void MouseHouse::serviceBottleCalibration() {
         return;
       }
     }
-    static const uint8_t registers[] = {
-        0x7B, 0x7D, 0x7F, 0x7E, MPR121_DEBOUNCE, MPR121_ECR};
-    static const uint8_t values[] = {0x0B, 200, 180, 130, 0, 0x8C};
-    uint8_t reg = index < 24 ? MPR121_TOUCHTH_0 + index : registers[index - 24];
-    uint8_t value = index < 24 ? (index % 2 ? 0 : 2) : values[index - 24];
+    uint8_t reg, value;
+    LickRecovery::setting(index, reg, value);
     cap_.writeRegister(reg, value);
     uint8_t actual = cap_.readRegister8(reg);
     if (reg == MPR121_ECR) bottleCalibrationEcr_ = actual;
@@ -769,7 +749,7 @@ void MouseHouse::serviceBottleCalibration() {
                             reg, value, actual);
       return;
     }
-    if (index == 29) {
+    if (index == LickRecovery::kRegisterCount - 1) {
       nextBottleCalibrationCheckUs_ = time_us_64() + BottleSwapState::kSettleUs;
     }
     return;
@@ -791,6 +771,13 @@ void MouseHouse::serviceBottleCalibration() {
       // Readiness already proved both channels released continuously. Accept
       // their next real edge, including one immediately after this boundary.
       leftDrinkNeedsRelease_ = rightDrinkNeedsRelease_ = false;
+      lickTouchSinceUs_[0] = lickTouchSinceUs_[1] = 0;
+      if (!lickRecovery_.available()) {
+        lickRecovery_.manualReady(now);
+        lickRecoveryEndCounts_[0] = leftDrinkEvent_.count;
+        lickRecoveryEndCounts_[1] = rightDrinkEvent_.count;
+        reportLickRecovery("LICK_RECOVERY_READY", "MANUAL_READY");
+      }
     }
     lastMpr121Check_ = millis();
     queueBottleState();
@@ -798,16 +785,111 @@ void MouseHouse::serviceBottleCalibration() {
 }
 
 void MouseHouse::checkMPR121Health() {
-  if (bottleSwap_.state != BottleSwapState::ACTIVE) return;
-  unsigned long nowMs = millis();
-  if (nowMs - lastMpr121Check_ >= kMpr121CheckIntervalMs) {
-    lastMpr121Check_ = nowMs;
-
-    if (mpr121Faulted()) {
-      emitLegacyLine("MPR121_FAULT_DETECTED");
-      resetMPR121();
-    }
+  if (!running_ || bottleSwap_.state != BottleSwapState::ACTIVE || !lickRecovery_.available()) {
+    mprHealthScanning_ = false;
+    return;
   }
+  unsigned long nowMs = millis();
+  if (!mprHealthScanning_) {
+    if (nowMs - lastMpr121Check_ < kMpr121CheckIntervalMs) return;
+    lastMpr121Check_ = nowMs;
+    uint64_t now = time_us_64();
+    for (unsigned side = 0; side < 2; ++side) {
+      if (lickTouchSinceUs_[side] && now - lickTouchSinceUs_[side] >= lickRecoveryTouchTimeoutUs_) {
+        beginLickRecovery(side == 0 ? "LEFT_TOUCH_TIMEOUT" : "RIGHT_TOUCH_TIMEOUT");
+        return;
+      }
+    }
+    mprHealthScanning_ = true; mprHealthCursor_ = 0;
+  }
+  // One register per service iteration, so sensor polling and camera/feeder
+  // services continue between reads instead of a blocking full register dump.
+  uint8_t reg, expected;
+  if (mprHealthCursor_ < 2) { reg = 0x02 + mprHealthCursor_; expected = 0; }
+  else LickRecovery::setting(mprHealthCursor_ - 2, reg, expected);
+  uint8_t actual = cap_.readRegister8(reg);
+  if (actual != expected) {
+    beginLickRecovery(mprHealthCursor_ < 2 ? "OUT_OF_RANGE" : "CONFIG_MISMATCH", reg, expected, actual);
+    return;
+  }
+  if (++mprHealthCursor_ >= LickRecovery::kRegisterCount + 2) mprHealthScanning_ = false;
+}
+
+void MouseHouse::setLickRecoveryTouchTimeoutMs(uint32_t milliseconds) {
+  if (milliseconds >= 100 && milliseconds <= 600000)
+    lickRecoveryTouchTimeoutUs_ = (uint64_t)milliseconds * 1000ULL;
+}
+
+void MouseHouse::reportLickRecovery(const char* eventType, const char* reason) {
+  uint64_t now = time_us_64();
+  uint64_t end = lickRecovery_.gapEnd ? lickRecovery_.gapEnd : now;
+  uint64_t stamp = lickRecovery_.gapEnd ? lickRecovery_.gapEnd : now;
+  uint64_t gap = lickRecovery_.id ? end - lickRecovery_.gapStart : 0;
+  unsigned long counts[] = {leftDrinkEvent_.count, rightDrinkEvent_.count};
+  if (lickRecovery_.gapEnd && lickRecovery_.id) {
+    counts[0] = lickRecoveryEndCounts_[0]; counts[1] = lickRecoveryEndCounts_[1];
+  }
+  const char* sides[] = {"LD", "RD"};
+  for (unsigned side = 0; side < 2; ++side)
+    logEvent(eventType, getTimestampUs() - (now - stamp), stamp, sides[side], counts[side],
+             gap, lickRecovery_.attempts,
+             lickRecovery_.id, getContext(), reason);
+}
+
+void MouseHouse::beginLickRecovery(const char* reason, uint8_t reg,
+                                    uint16_t expected, uint16_t actual) {
+  uint64_t now = time_us_64();
+  if (!lickRecovery_.request(now, reason)) return;
+  muteDrinkEvents("LickRecovery");
+  lickTouchSinceUs_[0] = lickTouchSinceUs_[1] = 0;
+  mprHealthScanning_ = false;
+  lickRecovery_.failedRegister = reg;
+  lickRecovery_.expected = expected; lickRecovery_.actual = actual;
+  reportLickRecovery("LICK_RECOVERY_START", reason);
+  reportLickRecoveryDiagnostic("BEGIN");
+}
+
+void MouseHouse::serviceLickRecovery() {
+  if (!running_ || bottleSwap_.state != BottleSwapState::ACTIVE) return;
+  LickRecovery::Change change = lickRecovery_.service(cap_, time_us_64());
+  if (change == LickRecovery::NONE) return;
+  if (change == LickRecovery::READY) {
+    lickRecoveryEndCounts_[0] = leftDrinkEvent_.count;
+    lickRecoveryEndCounts_[1] = rightDrinkEvent_.count;
+    leftDrinkNeedsRelease_ = rightDrinkNeedsRelease_ = false;
+    lastMpr121Check_ = millis();
+  }
+  const char* event = change == LickRecovery::READY ? "LICK_RECOVERY_READY" :
+      change == LickRecovery::RETRY ? "LICK_RECOVERY_RETRY" :
+      change == LickRecovery::EXHAUSTED ? "LICK_RECOVERY_FAILED" : "LICK_RECOVERY_ATTEMPT";
+  reportLickRecovery(event, lickRecovery_.reason);
+  reportLickRecoveryDiagnostic(event);
+}
+
+void MouseHouse::reportLickRecoveryDiagnostic(const char* stage) {
+  // Bounded snapshots only at transitions, never a continuous raw-data stream.
+  if (!queueText(MouseHouseProtocolV2::MESSAGE_DIAGNOSTIC, SerialTransport::PRIORITY_SAFETY,
+      "MPR121_DIAG,1,id=%lu,stage=%s,cause=%s,reg=0x%02x,expected=%u,actual=%u,"
+      "ecr=%u,oor_l=%u,oor_h=%u,touch=%u,lf=%u,lb=%u,rf=%u,rb=%u",
+      (unsigned long)lickRecovery_.id, stage, lickRecovery_.cause, lickRecovery_.failedRegister,
+      lickRecovery_.expected, lickRecovery_.actual, cap_.readRegister8(0x5E),
+      cap_.readRegister8(0x02), cap_.readRegister8(0x03), cap_.touched(),
+      cap_.filteredData(1), cap_.baselineData(1), cap_.filteredData(2), cap_.baselineData(2))) {
+    noteRequiredRecordFailure("MPR121_DIAG", time_us_64());
+  }
+}
+
+void MouseHouse::cancelLickRecovery() {
+  if (!lickRecovery_.available()) {
+    lickRecovery_.gapEnd = time_us_64();
+    lickRecoveryEndCounts_[0] = leftDrinkEvent_.count;
+    lickRecoveryEndCounts_[1] = rightDrinkEvent_.count;
+    reportLickRecovery("LICK_RECOVERY_STOPPED", "SESSION_STOPPED");
+    cap_.writeRegister(MPR121_ECR, 0x8C);
+  }
+  lickRecovery_.reset();
+  lickTouchSinceUs_[0] = lickTouchSinceUs_[1] = 0;
+  mprHealthScanning_ = false;
 }
 
 void MouseHouse::updateTimedBinaryEvent(TimedBinaryEvent& event,
@@ -978,7 +1060,7 @@ void MouseHouse::updatePelletWell() {
 }
 
 void MouseHouse::updateLeftDrink() {
-  if (bottleSwap_.state != BottleSwapState::ACTIVE) return;
+  if (bottleSwap_.state != BottleSwapState::ACTIVE || !lickRecovery_.available()) return;
   bool currentState = cap_.touched() & (1 << 1);
   if (leftDrinkNeedsRelease_) {
     if (!currentState) leftDrinkNeedsRelease_ = false;
@@ -986,14 +1068,15 @@ void MouseHouse::updateLeftDrink() {
   }
   uint64_t nowUnix = getTimestampUs();
   uint64_t nowUs = time_us_64();
-
+  if (!currentState) lickTouchSinceUs_[0] = 0;
+  else if (!lickTouchSinceUs_[0]) lickTouchSinceUs_[0] = nowUs;
   updateTimedBinaryEvent(leftDrinkEvent_, currentState,
                          "DRINK_START", "DRINK_END", "LD",
                          nowUnix, nowUs);
 }
 
 void MouseHouse::updateRightDrink() {
-  if (bottleSwap_.state != BottleSwapState::ACTIVE) return;
+  if (bottleSwap_.state != BottleSwapState::ACTIVE || !lickRecovery_.available()) return;
   bool currentState = cap_.touched() & (1 << 2);
   if (rightDrinkNeedsRelease_) {
     if (!currentState) rightDrinkNeedsRelease_ = false;
@@ -1001,7 +1084,8 @@ void MouseHouse::updateRightDrink() {
   }
   uint64_t nowUnix = getTimestampUs();
   uint64_t nowUs = time_us_64();
-
+  if (!currentState) lickTouchSinceUs_[1] = 0;
+  else if (!lickTouchSinceUs_[1]) lickTouchSinceUs_[1] = nowUs;
   updateTimedBinaryEvent(rightDrinkEvent_, currentState,
                          "DRINK_START", "DRINK_END", "RD",
                          nowUnix, nowUs);
@@ -1954,6 +2038,7 @@ void MouseHouse::updateBackgroundServices() {
   serviceFeed();
   serviceIndicatorRefresh();
   serviceBottleCalibration();
+  serviceLickRecovery();
   checkMPR121Health();
   updateTone();
   updateClickPattern();
@@ -2071,7 +2156,6 @@ void MouseHouse::startSession(uint32_t fps, bool triggerCamera) {
   cameraFirstIrqUs_ = 0;
   cameraLastIrqUs_ = 0;
   cameraLoggedFrameCount_ = 0;
-  configureMPR121Silent();
   clearTimeoutState();
 
   fps_ = triggerCamera ? fps : 0;
@@ -2083,6 +2167,7 @@ void MouseHouse::startSession(uint32_t fps, bool triggerCamera) {
   nextCameraCheckpointUs_ = 0;
   resetSessionEventCounts();
   bottleSwap_.reset(time_us_64(), 0, 0);
+  lickRecovery_.reset();
   leftDrinkNeedsRelease_ = rightDrinkNeedsRelease_ = false;
   syncBehavioralStateToSensors(getTimestampUs());
 
@@ -2103,6 +2188,7 @@ void MouseHouse::startSession(uint32_t fps, bool triggerCamera) {
              getContext(),
              kNanString);
   }
+  beginLickRecovery("SESSION_START");
 }
 
 void MouseHouse::stopSession() {
@@ -2122,6 +2208,7 @@ void MouseHouse::stopSession() {
   frameCounter_ = finalFrames;
   if (finalFrames == 0) lastFrameUs = time_us_64();
 
+  cancelLickRecovery();
   if (bottleSwap_.id[0]) {
     // A stop during calibration must not leave the device in hardware stop mode.
     cap_.writeRegister(MPR121_ECR, 0x8C);

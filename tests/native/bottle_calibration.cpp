@@ -9,6 +9,7 @@
 #include <vector>
 #include <utility>
 #include "BottleSwapState.h"
+#include "LickRecovery.h"
 uint64_t testUs = 100;
 uint64_t time_us_64() { return testUs++; }
 unsigned long millis() { return testUs / 1000; }
@@ -26,6 +27,20 @@ constexpr uint8_t MPR121_ECR=0x5E, MPR121_TOUCHTH_0=0x41, MPR121_DEBOUNCE=0x5B;
 class MouseHouse {
 public:
   BottleSwapState bottleSwap_;
+  LickRecovery lickRecovery_;
+  unsigned long lickRecoveryEndCounts_[2]={0,0};
+  uint64_t lickTouchSinceUs_[2]={0,0}, lickRecoveryTouchTimeoutUs_=5000000;
+  bool mprHealthScanning_=false;
+  uint8_t mprHealthCursor_=0;
+  static constexpr unsigned long kMpr121CheckIntervalMs=1000;
+  void beginLickRecovery(const char*,uint8_t=0,uint16_t=0,uint16_t=0);
+  void serviceLickRecovery();
+  void reportLickRecovery(const char*,const char*);
+  void reportLickRecoveryDiagnostic(const char*);
+  void cancelLickRecovery();
+  void checkMPR121Health();
+  void setLickRecoveryTouchTimeoutMs(uint32_t);
+  void updateLeftDrink(); void updateRightDrink();
   SerialTransport transport_;
   bool running_=true, leftDrinkNeedsRelease_=false, rightDrinkNeedsRelease_=false;
   bool cameraTriggersEnabled_=false, feedActive_=false, compatibilitySerialMode_=false;
@@ -50,6 +65,7 @@ public:
   static constexpr uint64_t kNotApplicable=69420;
   struct TimedBinaryEvent {
     bool previousState=false, justEnded=false;
+    uint64_t startTime=0, endTime=0;
     unsigned long count=0;
   } leftDrinkEvent_, rightDrinkEvent_;
   struct Cap {
@@ -81,9 +97,14 @@ public:
         if (failStop) return;
         if (stopWriteFailures) { --stopWriteFailures; return; }
       }
-      regs[reg]=value;
+      if(reg==0x80 && value==0x63) {
+        for(auto& entry:regs) entry=0;
+        regs[0x5D]=0x24;
+      } else regs[reg]=value;
     }
     uint16_t touched() { return touches; }
+    uint16_t filteredData(uint8_t) { return 500; }
+    uint16_t baselineData(uint8_t) { return 504; }
   } cap_;
   struct Record { uint8_t type; std::string line; };
   std::vector<Record> records;
@@ -101,10 +122,17 @@ public:
     records.push_back({type,text}); return true;
   }
   void noteRequiredRecordFailure(const char*, uint64_t) { ++integrityFailures; }
-  void sendCommandError(const char*,const char*) { assert(false); }
+  std::vector<std::string> errors;
+  void sendCommandError(const char*,const char* reason) { errors.emplace_back(reason); }
   uint64_t getTimestampUs() { return testUs; }
   const char* getContext() { return "Test"; }
-  template<typename... Args> void logEvent(Args...) {}
+  struct Event { std::string type, side, reason; unsigned long count; uint64_t gap; long id; };
+  std::vector<Event> events;
+  void logEvent(const char* type,uint64_t,uint64_t,const char* side,unsigned long count,
+                uint64_t gap,uint64_t,long id,const char*,const char* reason) {
+    events.push_back({type,side,reason,count,gap,id});
+  }
+  void updateTimedBinaryEvent(TimedBinaryEvent&,bool,const char*,const char*,const char*,uint64_t,uint64_t);
   void primeTimedBinaryEvent(TimedBinaryEvent& e,bool state,uint64_t) {
     e.previousState=state; e.justEnded=false;
   }
@@ -126,16 +154,16 @@ void begin(MouseHouse& m) {
 }
 void program(MouseHouse& m) {
   size_t base=m.cap_.writes.size();
-  for (int i=0;i<30;++i) m.serviceBottleCalibration();
+  for (int i=0;i<LickRecovery::kRegisterCount;++i) m.serviceBottleCalibration();
   assert(m.bottleSwap_.state==BottleSwapState::CALIBRATING);
-  assert(m.cap_.writes.size()==base+30);
+  assert(m.cap_.writes.size()==base+LickRecovery::kRegisterCount);
   for (int i=0;i<24;++i) {
-    assert(m.cap_.writes[base+i].first==0x41+i);
-    assert(m.cap_.writes[base+i].second==(i%2?0:2));
+    assert(m.cap_.writes[base+i+13].first==0x41+i);
+    assert(m.cap_.writes[base+i+13].second==(i%2?0:2));
   }
   const uint8_t regs[]={0x7B,0x7D,0x7F,0x7E,0x5B,0x5E};
   const uint8_t vals[]={0x0B,200,180,130,0,0x8C};
-  for(int i=0;i<6;++i) assert(m.cap_.writes[base+i+24]==std::make_pair(regs[i],vals[i]));
+  for(int i=0;i<6;++i) assert(m.cap_.writes[base+i+37]==std::make_pair(regs[i],vals[i]));
 }
 void ready(MouseHouse& m) {
   testUs=m.nextBottleCalibrationCheckUs_;
@@ -205,8 +233,8 @@ int main(int,char**) {
   for(int reg : {0x41,0x50}) {
     MouseHouse m; begin(m); m.cap_.badReg=reg; exhaust(m);
     const char* detail=reg==0x41
-      ? "REGISTER_VERIFY,register=0x41,expected=0x0002,actual=0x00fd,cursor=1"
-      : "REGISTER_VERIFY,register=0x50,expected=0x0000,actual=0x00ff,cursor=16";
+      ? "REGISTER_VERIFY,register=0x41,expected=0x0002,actual=0x00fd,cursor=14"
+      : "REGISTER_VERIFY,register=0x50,expected=0x0000,actual=0x00ff,cursor=29";
     failed(m,"CAL_REGISTER_VERIFY_FAILED",detail);
     assert(m.cap_.reads[reg]==3);
   }
@@ -241,5 +269,111 @@ int main(int,char**) {
     size_t writes=m.cap_.writes.size(), records=m.records.size();
     m.serviceBottleCalibration();
     assert(m.cap_.writes.size()==writes && m.records.size()==records);
+  }
+
+  // Actual automatic service: preserved counters, complete verified settings,
+  // settling measured from Run, release gating, and no bottle transaction.
+  {
+    MouseHouse m; m.leftDrinkEvent_.count=21; m.rightDrinkEvent_.count=16;
+    m.beginLickRecovery("SESSION_START");
+    m.handleBottleCommand((std::string("BOTTLE_PAUSE,")+id).c_str());
+    assert(m.errors.back()=="SENSOR_RECOVERY_ACTIVE");
+    assert(m.bottleSwap_.state==BottleSwapState::ACTIVE && m.bottleSwap_.id[0]=='\0');
+    m.updateLeftDrink(); assert(m.leftDrinkEvent_.count==21);
+    assert(m.bottleSwap_.id[0]=='\0');
+    m.serviceLickRecovery();
+    size_t resetWrites=m.cap_.writes.size();
+    m.serviceLickRecovery(); assert(m.cap_.writes.size()==resetWrites);
+    testUs+=3000; m.serviceLickRecovery();
+    for (unsigned i=0;i<LickRecovery::kRegisterCount;++i) m.serviceLickRecovery();
+    assert(m.lickRecovery_.state==LickRecovery::CALIBRATING);
+    assert(m.cap_.regs[0x43]==2 && m.cap_.regs[0x44]==0 && m.cap_.regs[0x5B]==0);
+    assert(m.cap_.regs[0x7B]==0x0B && m.cap_.regs[0x5E]==0x8C);
+    testUs+=LickRecovery::kSettleUs;
+    m.cap_.touches=2; m.serviceLickRecovery();
+    testUs+=300000; m.serviceLickRecovery();
+    assert(!m.lickRecovery_.available());
+    m.cap_.touches=0; testUs+=10000; m.serviceLickRecovery();
+    testUs+=LickRecovery::kReleaseUs; m.serviceLickRecovery();
+    assert(m.lickRecovery_.available());
+    assert(m.events.back().type=="LICK_RECOVERY_READY" && m.events.back().count==16);
+    assert(m.events.back().gap>=750000);
+    assert(m.leftDrinkEvent_.count==21 && m.rightDrinkEvent_.count==16);
+    m.cap_.touches=2; m.updateLeftDrink();
+    assert(m.leftDrinkEvent_.count==22); // First real edge after verified release.
+    testUs+=5000000; m.checkMPR121Health();
+    assert(m.lickRecovery_.busy()); // Sustained touch automatically recovers.
+    assert(std::string(m.lickRecovery_.cause)=="LEFT_TOUCH_TIMEOUT");
+    assert(m.bottleSwap_.id[0]=='\0' && m.bottleSwap_.state==BottleSwapState::ACTIVE);
+    m.stopSession();
+    assert(m.lickRecovery_.available() && !m.running_);
+    size_t writes=m.cap_.writes.size(); m.serviceLickRecovery();
+    assert(m.cap_.writes.size()==writes);
+  }
+  {
+    MouseHouse m; m.cap_.failStop=true;
+    m.beginLickRecovery("CONFIG_MISMATCH");
+    for (int i=0;i<3;++i) {
+      m.serviceLickRecovery();
+      if(i<2) {
+        assert(m.lickRecovery_.state==LickRecovery::WAITING);
+        size_t writes=m.cap_.writes.size();
+        m.serviceLickRecovery(); assert(m.cap_.writes.size()==writes);
+        testUs+=LickRecovery::kCooldownUs;
+      }
+    }
+    assert(m.lickRecovery_.state==LickRecovery::FAILED);
+    assert(m.events.back().type=="LICK_RECOVERY_FAILED");
+    size_t writes=m.cap_.writes.size(); testUs+=120000000;
+    m.serviceLickRecovery(); assert(m.cap_.writes.size()==writes); // No reset storm.
+    m.cap_.touches=2; m.updateLeftDrink(); assert(m.leftDrinkEvent_.count==0);
+    m.cap_.failStop=false; m.cap_.touches=0;
+    begin(m); program(m); ready(m); // Explicit bottle recalibration recovers FAILED.
+    assert(m.lickRecovery_.available() && m.lickRecovery_.attempts==0);
+  }
+  {
+    MouseHouse m;
+    // Populate the expected configuration, then corrupt a lick threshold.
+    for(uint8_t i=0;i<LickRecovery::kRegisterCount;++i) {
+      uint8_t reg,value; LickRecovery::setting(i,reg,value); m.cap_.regs[reg]=value;
+    }
+    m.cap_.regs[0x43]=9;
+    testUs+=1000000;
+    for(int i=0;i<50 && m.lickRecovery_.available();++i) m.checkMPR121Health();
+    assert(m.lickRecovery_.busy() && std::string(m.lickRecovery_.cause)=="CONFIG_MISMATCH");
+    m.setLickRecoveryTouchTimeoutMs(10000); assert(m.lickRecoveryTouchTimeoutUs_==10000000);
+    m.setLickRecoveryTouchTimeoutMs(0); assert(m.lickRecoveryTouchTimeoutUs_==10000000);
+  }
+
+  // Repeated successful resets are also bounded, not only failed attempts.
+  {
+    MouseHouse m;
+    for(int attempt=0;attempt<3;++attempt) {
+      m.beginLickRecovery("CONFIG_MISMATCH");
+      for(int tick=0;tick<1000 && !m.lickRecovery_.available();++tick) {
+        testUs+=10000; m.serviceLickRecovery();
+      }
+      assert(m.lickRecovery_.available());
+      assert(m.lickRecovery_.attempts==attempt+1);
+    }
+    m.beginLickRecovery("CONFIG_MISMATCH");
+    testUs+=LickRecovery::kCooldownUs;
+    size_t writes=m.cap_.writes.size(); m.serviceLickRecovery();
+    assert(m.lickRecovery_.state==LickRecovery::FAILED);
+    assert(m.cap_.writes.size()==writes);
+  }
+  // Readiness failures never resume counting; reset verification is explicit.
+  for(int fault=0;fault<3;++fault) {
+    MouseHouse m; m.leftDrinkEvent_.count=7; m.rightDrinkEvent_.count=11;
+    if(fault==0) m.cap_.touches=2;
+    if(fault==1) m.cap_.badReg=0x02;
+    if(fault==2) m.cap_.badReg=0x5D;
+    m.beginLickRecovery("OUT_OF_RANGE");
+    for(int tick=0;tick<500 && m.lickRecovery_.state!=LickRecovery::FAILED;++tick) {
+      testUs+=100000; m.serviceLickRecovery();
+    }
+    assert(m.lickRecovery_.state==LickRecovery::FAILED);
+    assert(m.leftDrinkEvent_.count==7 && m.rightDrinkEvent_.count==11);
+    assert(m.bottleSwap_.id[0]=='\0');
   }
 }
