@@ -48,9 +48,11 @@ public:
       failedRegister = 0; expected = actual = 0;
       cap.writeRegister(0x5E, 0);
       actual = cap.readRegister8(0x5E);
-      if (actual != 0) return fail(now, "STOP_VERIFY_FAILED", 0x5E, 0, actual);
+      // ECR bits 5:0 enable electrodes/proximity. Bits 7:6 select baseline
+      // calibration; 0x40/0x80/0xC0 are valid Stop states, not failed stops.
+      if ((actual & 0x3F) != 0) return fail(now, "STOP_VERIFY_FAILED", 0x5E, 0, actual);
       // Stop first: the Adafruit register writer restores the previous ECR
-      // after a reset write. Its saved value must therefore already be zero.
+      // after a reset write. The saved value must have no enabled channels.
       cap.writeRegister(0x80, 0x63);
       resetPending_ = true; resetReadyAt_ = now + 3000ULL;
       return ATTEMPT;
@@ -64,7 +66,9 @@ public:
       uint8_t config = cap.readRegister8(0x5D);
       if (config != 0x24) return fail(now, "RESET_VERIFY_FAILED", 0x5D, 0x24, config);
       uint8_t ecr = cap.readRegister8(0x5E);
-      if (ecr != 0) return fail(now, "STOP_VERIFY_FAILED", 0x5E, 0, ecr);
+      // The register writer can restore the saved calibration bits after
+      // soft reset. Confirm Stop mode independently of those upper bits.
+      if ((ecr & 0x3F) != 0) return fail(now, "STOP_VERIFY_FAILED", 0x5E, 0, ecr);
       return NONE;
     }
     if (cursor < kRegisterCount) {

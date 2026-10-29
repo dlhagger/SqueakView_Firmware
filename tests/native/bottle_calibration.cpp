@@ -71,6 +71,7 @@ public:
   struct Cap {
     uint8_t regs[256]{};
     bool failStop=false;
+    uint8_t stopReadback=0, resetEcrReadback=0;
     unsigned stopWriteFailures=0, ecrReadFailures=0, transientBadReads=0;
     int badReg=-1;
     unsigned reads[256]{};
@@ -96,10 +97,13 @@ public:
       if (reg==MPR121_ECR && value==0) {
         if (failStop) return;
         if (stopWriteFailures) { --stopWriteFailures; return; }
+        regs[reg]=stopReadback;
+        return;
       }
       if(reg==0x80 && value==0x63) {
         for(auto& entry:regs) entry=0;
         regs[0x5D]=0x24;
+        regs[MPR121_ECR]=resetEcrReadback;
       } else regs[reg]=value;
     }
     uint16_t touched() { return touches; }
@@ -191,6 +195,81 @@ void exhaust(MouseHouse& m) {
   assert(m.bottleCalibrationAttempt_==3);
 }
 int main(int,char**) {
+  // Exercise every ECR byte in both production Stop-verification paths.
+  // Only 00/40/80/C0 mean stopped; any electrode/proximity bit must fail.
+  for (unsigned raw=0;raw<256;++raw) {
+    bool stopped=(raw==0 || raw==0x40 || raw==0x80 || raw==0xC0);
+    {
+      MouseHouse m; m.cap_.stopReadback=uint8_t(raw);
+      begin(m);
+      if(stopped) { program(m); ready(m); assert(m.bottleCalibrationAttempt_==1); }
+      else {
+        m.serviceBottleCalibration();
+        assert(m.bottleCalibrationRetryPending_);
+        assert(m.records.back().line.find("STOP_VERIFY")!=std::string::npos);
+        assert(m.leftDrinkNeedsRelease_ && m.rightDrinkNeedsRelease_);
+      }
+    }
+    {
+      MouseHouse m; m.cap_.stopReadback=uint8_t(raw);
+      m.beginLickRecovery("SESSION_START"); m.serviceLickRecovery();
+      assert(m.lickRecovery_.attempts==1);
+      if(stopped) {
+        assert(m.lickRecovery_.state==LickRecovery::CALIBRATING);
+        for(int tick=0;tick<200 && !m.lickRecovery_.available();++tick) {
+          testUs+=10000; m.serviceLickRecovery();
+        }
+        assert(m.lickRecovery_.available() && m.lickRecovery_.attempts==1);
+      } else {
+        assert(m.lickRecovery_.state==LickRecovery::WAITING);
+        assert(std::string(m.lickRecovery_.reason)=="STOP_VERIFY_FAILED");
+        assert(m.lickRecovery_.actual==raw);
+        assert(m.cap_.writes.size()==1); // No reset/configuration while enabled.
+      }
+    }
+    {
+      MouseHouse m; m.cap_.resetEcrReadback=uint8_t(raw);
+      m.beginLickRecovery("SESSION_START"); m.serviceLickRecovery();
+      testUs+=3000; m.serviceLickRecovery();
+      assert(m.lickRecovery_.state==(stopped ? LickRecovery::CALIBRATING : LickRecovery::WAITING));
+      if(stopped) {
+        for(int tick=0;tick<200 && !m.lickRecovery_.available();++tick) {
+          testUs+=10000; m.serviceLickRecovery();
+        }
+        assert(m.lickRecovery_.available() && m.lickRecovery_.attempts==1);
+      } else {
+        assert(std::string(m.lickRecovery_.reason)=="STOP_VERIFY_FAILED");
+        assert(m.lickRecovery_.actual==raw);
+        assert(m.cap_.writes.size()==2); // Stop/reset only, no register program.
+      }
+    }
+  }
+  // Upper bits are significant in Run mode: an enabled sensor with the
+  // wrong baseline calibration mode must remain unavailable.
+  for(uint8_t ecr : {0x0C,0x4C,0xCC,0x8D,0xFF}) {
+    MouseHouse m; begin(m); program(m);
+    m.cap_.regs[MPR121_ECR]=ecr;
+    testUs=m.nextBottleCalibrationCheckUs_; m.serviceBottleCalibration();
+    assert(m.bottleSwap_.state==BottleSwapState::CALIBRATING);
+    assert(m.leftDrinkNeedsRelease_ && m.rightDrinkNeedsRelease_);
+    testUs=m.bottleSwap_.boundaryUs+BottleSwapState::kDeadlineUs;
+    m.serviceBottleCalibration();
+    failed(m,"CAL_SENSOR_HEALTH_TIMEOUT","READINESS");
+    MouseHouse automatic;
+    automatic.beginLickRecovery("SESSION_START"); automatic.serviceLickRecovery();
+    testUs+=3000; automatic.serviceLickRecovery();
+    for(unsigned index=0;index<LickRecovery::kRegisterCount;++index) automatic.serviceLickRecovery();
+    automatic.cap_.regs[MPR121_ECR]=ecr;
+    testUs+=LickRecovery::kSettleUs; automatic.serviceLickRecovery();
+    assert(!automatic.lickRecovery_.available());
+    assert(automatic.lickRecovery_.failedRegister==MPR121_ECR);
+    assert(automatic.lickRecovery_.expected==0x8C && automatic.lickRecovery_.actual==ecr);
+    testUs+=LickRecovery::kDeadlineUs; automatic.serviceLickRecovery();
+    assert(automatic.lickRecovery_.state==LickRecovery::WAITING);
+    assert(std::string(automatic.lickRecovery_.reason)=="READINESS_TIMEOUT");
+    automatic.cap_.touches=2; automatic.updateLeftDrink();
+    assert(automatic.leftDrinkEvent_.count==0);
+  }
   // Both observed candidate faults recover within one Resume request.
   for (int fault=0;fault<3;++fault) {
     MouseHouse m;

@@ -733,7 +733,9 @@ void MouseHouse::serviceBottleCalibration() {
     if (index == 0) {
       uint8_t actual = cap_.readRegister8(MPR121_ECR);
       bottleCalibrationEcr_ = actual;
-      if (actual != 0) {
+      // Only bits 5:0 determine Stop. Retained calibration-lock bits must
+      // not trigger a retry; the final Run configuration is checked exactly.
+      if ((actual & 0x3F) != 0) {
         failBottleCalibration("CAL_STOP_VERIFY_FAILED", "STOP_VERIFY",
                               MPR121_ECR, 0, actual);
         return;
