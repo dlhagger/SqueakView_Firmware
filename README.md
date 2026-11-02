@@ -2,6 +2,16 @@
 
 First-pass Arduino library for the MouseHouse behavioral rig.
 
+## Repository contents
+
+Commit firmware and host-tool source, tests, build configuration, dependency
+locks, protocol documentation, and the hardware guardrails in `AGENTS.md`.
+Keep refactor plans, implementation checklists, and review scratch notes
+outside the checkout or in ignored `local-notes/`. Device logs, local editor
+settings, environments, and build outputs remain untracked. The generated
+`src/camera_ttl.pio.h` is intentionally committed for Arduino IDE builds and
+must stay synchronized with `src/camera_ttl.pio`.
+
 ## PlatformIO
 
 This repository is also a ready-to-build PlatformIO project. It targets the
