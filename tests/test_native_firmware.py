@@ -1,6 +1,7 @@
 """Run production C++ transport and task code against host hardware boundaries."""
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -58,12 +59,31 @@ class NativeFirmwareTests(unittest.TestCase):
                 closing += 1
             methods.append(source[start:closing])
         (cls.build / "calibration_methods.inc").write_text("\n".join(methods))
-        for name in ("replay", "qualification", "go_nogo", "bottle_swap", "rtc", "behavior_session", "bottle_calibration"):
+        # Compile the actual sketch with both documented faceplate settings.
+        sketch = (ROOT / "examples/fixed_ratio/fixed_ratio.ino").read_text()
+        mode_settings = re.findall(
+            r"constexpr PelletMode PELLET_MODE = (?:TRANSIENT_DELIVERY|LATCHED_PRESENCE);",
+            sketch,
+        )
+        if len(mode_settings) != 1:
+            raise RuntimeError("Update the native faceplate variants for the configured pellet mode")
+        sketch_variants = {}
+        for name, mode in (("fixed_ratio", "TRANSIENT_DELIVERY"),
+                           ("fixed_ratio_latched", "LATCHED_PRESENCE")):
+            variant = cls.build / f"{name}.ino"
+            variant.write_text(sketch.replace(
+                mode_settings[0], f"constexpr PelletMode PELLET_MODE = {mode};"
+            ))
+            sketch_variants[name] = variant
+        for name in ("replay", "qualification", "go_nogo", "fixed_ratio", "fixed_ratio_latched", "bottle_swap", "rtc", "behavior_session", "bottle_calibration"):
+            source_name = "fixed_ratio" if name == "fixed_ratio_latched" else name
             command = [
                 "g++", "-std=c++17", "-Wall", "-Wextra",
                 f"-I{NATIVE}", f"-I{ROOT / 'src'}", f"-I{cls.build}",
-                str(NATIVE / f"{name}.cpp"),
+                str(NATIVE / f"{source_name}.cpp"),
             ]
+            if name in sketch_variants:
+                command.append(f'-DFIXED_RATIO_SKETCH="{sketch_variants[name]}"')
             if name == "replay":
                 command.append(str(ROOT / "src/SerialTransport.cpp"))
             if name == "rtc":
@@ -100,6 +120,19 @@ class NativeFirmwareTests(unittest.TestCase):
 
     def test_rejected_feed_does_not_advance_training(self):
         self.run_native("go_nogo", 1)
+
+    def test_fixed_ratio_startup_well_warning_and_recovery_preserve_feeding(self):
+        for initially_blocked in (0, 1):
+            with self.subTest(initially_blocked=initially_blocked):
+                self.run_native("fixed_ratio", initially_blocked)
+
+    def test_fixed_ratio_watchdog_requires_five_continuous_minutes_and_rearms(self):
+        self.run_native("fixed_ratio", 2)
+
+    def test_fixed_ratio_latched_presence_never_reports_blockage(self):
+        for initially_blocked in (0, 1):
+            with self.subTest(initially_blocked=initially_blocked):
+                self.run_native("fixed_ratio_latched", initially_blocked)
 
     def test_bottle_swap_retries_calibration_and_counter_boundaries(self):
         self.run_native("bottle_swap", 0)

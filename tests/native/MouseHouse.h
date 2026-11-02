@@ -4,8 +4,10 @@
 
 class MouseHouse {
 public:
-  enum PelletSensorMode { PELLET_SENSOR_LATCHED_PRESENCE };
+  enum PelletSensorMode { PELLET_SENSOR_LATCHED_PRESENCE, PELLET_SENSOR_TRANSIENT_DELIVERY };
   enum TimeoutSignalMode { TIMEOUT_CLICK_PATTERN };
+  enum HouseLightTimeBasis { HOUSE_LIGHT_US_EASTERN };
+  bool leftEnded = false, rightEnded = false;
   bool running = false, feeding = false, jammed = false, rejectFeed = false;
   bool cameraTriggers = true;
   std::vector<std::string> loggedEvents;
@@ -27,13 +29,15 @@ public:
   bool rightPokeActive() const { return right; }
   bool leftDrinkActive() const { return false; }
   bool rightDrinkActive() const { return false; }
-  bool leftPokeEnded() { return false; }
-  bool rightPokeEnded() { return false; }
+  bool leftPokeEnded() { bool value = leftEnded; leftEnded = false; return value; }
+  bool rightPokeEnded() { bool value = rightEnded; rightEnded = false; return value; }
   bool leftDrinkEnded() { return false; }
   bool rightDrinkEnded() { return false; }
   bool pelletRetrieved() { return false; }
   bool timeoutEnded() { return false; }
   bool rtcValid() const { return true; }
+  uint32_t currentDayNumber(HouseLightTimeBasis) const { return 0; }
+  template <typename... Args> void setHouseLightSchedule(Args...) {}
   uint64_t timestampUs() const { return time_us_64(); }
   unsigned fps() const { return 30; }
   uint64_t framePeriodUs() const { return 33333; }

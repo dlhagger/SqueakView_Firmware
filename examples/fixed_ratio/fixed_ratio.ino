@@ -24,6 +24,7 @@ enum PelletMode {
   TRANSIENT_DELIVERY
 };
 constexpr PelletMode PELLET_MODE = TRANSIENT_DELIVERY;
+constexpr uint64_t PELLET_WELL_BLOCKED_WARNING_US = 5ULL * 60ULL * 1000000ULL;
 
 // The active nose poke alternates at midnight in America/New_York. The
 // reference date determines the sequence and makes it stable across resets.
@@ -62,6 +63,57 @@ bool pendingRewardDelivered = false;
 bool feedWasActive = false;
 bool taskRewardFeedInProgress = false;
 bool taskRewardFailedThisLoop = false;
+bool sessionWasRunning = false;
+bool pelletWellWarningActive = false;
+bool pelletWellBlockTiming = false;
+uint64_t pelletWellBlockedSinceUs = 0;
+
+void reportPelletWellStatus(bool blocked, const char* context, const char* reason) {
+  pelletWellWarningActive = blocked;
+  mh.logEvent(blocked ? "WELL_SENSOR_BLOCKED" : "WELL_SENSOR_CLEAR",
+              mh.timestampUs(), time_us_64(), "nan",
+              69420, 69420, 69420, blocked ? 1 : 0, context, reason);
+}
+
+void reportStartupPelletWell() {
+  pelletWellBlockTiming = false;
+  // A pellet can legitimately remain in a latched-presence well.
+  if (PELLET_MODE != TRANSIENT_DELIVERY) return;
+  // begin/setPelletSensorMode and startSession prime this state from GPIO 0.
+  bool blocked = mh.pelletSensorBlocked();
+  reportPelletWellStatus(blocked, "Startup", blocked
+      ? "Check pellet well for blockage or cleaning"
+      : "Pellet well sensor clear");
+}
+
+void updatePelletWellWarning(bool running) {
+  if (PELLET_MODE != TRANSIENT_DELIVERY || !running) {
+    pelletWellBlockTiming = false;
+    return;
+  }
+  if (!sessionWasRunning) {
+    reportStartupPelletWell();
+    return;
+  }
+  if (!mh.pelletSensorBlocked()) {
+    pelletWellBlockTiming = false;
+    if (pelletWellWarningActive) {
+      reportPelletWellStatus(false, "Recovery", "Pellet well sensor clear");
+    }
+    return;
+  }
+  if (pelletWellWarningActive) return;
+
+  // Time continuous blockage without delaying sensor, feeder, or camera work.
+  uint64_t nowUs = time_us_64();
+  if (!pelletWellBlockTiming) {
+    pelletWellBlockedSinceUs = nowUs;
+    pelletWellBlockTiming = true;
+  } else if (nowUs - pelletWellBlockedSinceUs >= PELLET_WELL_BLOCKED_WARNING_US) {
+    reportPelletWellStatus(true, "Watchdog",
+        "Blocked for 5 minutes; check blockage or cleaning");
+  }
+}
 
 ActivePoke oppositePoke(ActivePoke poke) {
   return poke == LEFT ? RIGHT : LEFT;
@@ -167,6 +219,7 @@ void setup() {
   } else {
     mh.setPelletSensorMode(MouseHouse::PELLET_SENSOR_TRANSIENT_DELIVERY);
   }
+  reportStartupPelletWell();
 }
 
 void loop() {
@@ -177,6 +230,9 @@ void loop() {
   bool running = mh.isRunning();
   bool feedActive = mh.isFeedActive();
   taskRewardFailedThisLoop = false;
+
+  updatePelletWellWarning(running);
+  sessionWasRunning = running;
 
   // A stopped session abandons an unfinished ratio. Keep a pending calendar
   // change, but no longer require the old side to complete a reward first.

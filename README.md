@@ -29,6 +29,26 @@ progress, the handoff occurs as soon as the poke sensors and feeder are idle.
 Stopping a session abandons partial task progress, as it does at other times,
 and permits the pending calendar side to be applied.
 
+In **transient-delivery mode only**, the fixed-ratio sketch checks the active-low
+pellet-well input after boot initialization and at each task start. It emits
+`WELL_SENSOR_BLOCKED` immediately if blocked, or `WELL_SENSOR_CLEAR` if clear.
+While the task runs, a watchdog also emits one blocked warning if the sensor
+stays continuously blocked for five minutes. SqueakView displays **PELLET WELL
+BLOCKED / OCCLUDED**, distinguishes startup from the five-minute warning, and
+instructs the operator to check the well for a pellet, obstruction, or cleaning.
+Clearing the beam while running dismisses either warning and resets the timer;
+brief pellet passages do not accumulate toward the threshold. A stopped task
+is checked again on its next start, and stopped time does not count toward the
+watchdog. In **latched-presence mode**, neither check emits these warnings: a
+pellet can legitimately remain in the sensed well.
+
+These checks do not latch a motor jam, alter feeding or lighting, or measure
+motor power. Deploy both the fixed-ratio firmware and the updated host
+application. On the bench, verify blocked and clear starts, five-minute blockage
+and recovery, a second task start, normal feeding, and no blockage warnings in
+latched-presence mode. Software tests and compilation do not validate the
+sensor's electrical behavior.
+
 The other included tasks can be built or uploaded by selecting their
 environment:
 
@@ -294,6 +314,22 @@ The gate exits successfully only after validation passes. Firmware rejects
 both clock-measurement and clock-setting commands while a session or feeder is
 active. Close the PlatformIO monitor and any other serial client before using
 the gate.
+
+Both command-line clock tools accept legacy text replies after a fresh boot
+and reliable protocol-v2 replies after a SqueakView session, without rebooting
+or changing protocol mode. A fresh echoed `TIME_SYNC` challenge establishes an
+idle-controller boundary before any v2 acknowledgement. CRC-verified replies
+are flushed and fsynced to a new `*.transport-<id>.jsonl` beside the requested
+CSV/JSON output before cumulative acknowledgement. The validation JSON records
+this journal path; the sampling tool prints it. Replayed responses are
+deduplicated and sequence gaps request replay. CRC faults, reboot, active-session
+traffic and persistence failures abort the operation without acknowledging the
+affected record. Startup traffic before the challenge is not experiment
+recovery; the utility must only be used after SqueakView has released the port.
+The shared wire/journal implementation is vendored from the reviewed SqueakView
+revision identified in `controller_protocol_v2.py`, so the utilities still run
+without an installed SqueakView package. No firmware flash is needed for this
+host-tool update.
 
 The development Python version is recorded in `.python-version`; the utility
 supports Python 3.10 and newer. Commit `uv.lock` when dependencies change. The

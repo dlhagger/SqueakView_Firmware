@@ -11,15 +11,18 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import serial
+from .clock_transport import ClockTransport, journal_path_for
 
 
-def wait_for(port: Any, prefix: str, timeout: float = 3.0) -> tuple[str, int]:
+def wait_for(port: Any, prefix: str, timeout: float = 3.0, *, match=None) -> tuple[str, int]:
     """Return the first matching controller response and its host receive time."""
+    if isinstance(port, ClockTransport):
+        return port.wait_for(prefix, timeout, match=match)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         line = port.readline().decode(errors="replace").strip()
         received_ns = time.time_ns()
-        if line.startswith(prefix):
+        if line.startswith(prefix) and (match is None or match(line)):
             return line, received_ns
         if line.startswith("NACK,"):
             raise RuntimeError(line)
@@ -52,7 +55,8 @@ def collect(port: Any, sequence: int) -> dict[str, int | float | str]:
     """Collect one round-trip clock synchronization sample."""
     sent_ns = time.time_ns()
     port.write(f"TIME_SYNC,{sequence},{sent_ns}\n".encode())
-    line, received_ns = wait_for(port, "CLOCK_SYNC,")
+    line, received_ns = wait_for(port, "CLOCK_SYNC,",
+                                match=lambda text: text.startswith(f"CLOCK_SYNC,{sequence},{sent_ns},"))
     return parse_clock_response(line, sequence, sent_ns, received_ns)
 
 
@@ -115,9 +119,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     ]
     history = []
     needs_header = not args.csv.exists() or args.csv.stat().st_size == 0
-    with serial.Serial(args.port, 115200, timeout=0.25) as port, args.csv.open(
+    with serial.Serial(args.port, 115200, timeout=0.25) as raw_port, ClockTransport(
+        raw_port, journal_path_for(args.csv)
+    ) as port, args.csv.open(
         "a", newline=""
     ) as output:
+        if port.journal_path.exists():
+            print(f"controller_journal={port.journal_path}")
         writer = csv.DictWriter(output, fieldnames=fields)
         if needs_header:
             writer.writeheader()

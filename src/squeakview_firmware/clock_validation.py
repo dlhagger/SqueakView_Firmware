@@ -14,6 +14,7 @@ from typing import Any, Callable, Sequence
 import serial
 
 from .clock_sync import collect, positive_float, wait_for
+from .clock_transport import ClockTransport, journal_path_for
 
 
 DEFAULT_SAMPLE_COUNT = 7
@@ -204,7 +205,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     try:
         status = host_time_status()
         if status["ntp_synchronized"]:
-            with serial.Serial(args.port, 115200, timeout=0.25) as port:
+            with serial.Serial(args.port, 115200, timeout=0.25) as raw_port, ClockTransport(
+                raw_port, journal_path_for(output_path)
+            ) as port:
                 record = validate_clock(
                     port,
                     host_status=status,
@@ -213,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     max_offset_seconds=args.max_offset_seconds,
                     interval=args.interval,
                 )
+                record["controller_journal"] = str(port.journal_path) if port.journal_path.exists() else None
         else:
             record = validate_clock(
                 None,
