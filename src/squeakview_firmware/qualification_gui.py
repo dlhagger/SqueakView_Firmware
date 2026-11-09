@@ -146,6 +146,7 @@ class QualificationWindow(QMainWindow):
         self.clock_gate_pending_sequence: int | None = None
         self.clock_gate_pending_sent_ns: int | None = None
         self.clock_gate_after_correction = False
+        self._clock_gate_generation = 0
         self.connection_issue = ""
         self.camera_start_pending = False
         self._build_ui()
@@ -487,6 +488,9 @@ class QualificationWindow(QMainWindow):
         self.notice.setText(message)
 
     def disconnect_serial(self, reason: str = "Disconnected") -> None:
+        self._clock_gate_generation += 1
+        self.clock_gate_pending_sequence = None
+        self.clock_gate_pending_sent_ns = None
         self.read_timer.stop()
         self.handshake_timer.stop()
         if self.port is not None:
@@ -539,10 +543,14 @@ class QualificationWindow(QMainWindow):
         if line.startswith("CLOCK_SYNC,"):
             self._handle_clock_sync_response(line, received_ns or time.time_ns())
         elif line.startswith("ACK_SET_RTC,") and self.clock_gate_state == "correcting":
+            # Retire the correction deadline as soon as its ACK arrives.
+            self._clock_gate_generation += 1
+            generation = self._clock_gate_generation
             if self.clock_validation_record is not None:
                 self.clock_validation_record["set_rtc_ack"] = line
                 self.clock_validation_record["correction_applied"] = True
-            QTimer.singleShot(100, lambda: self._start_clock_validation(True))
+            QTimer.singleShot(100, lambda: self._start_clock_validation(True)
+                              if generation == self._clock_gate_generation else None)
         event = self.state.apply_line(line)
         if event == "camera_started":
             self.camera_start_pending = False
@@ -664,6 +672,7 @@ class QualificationWindow(QMainWindow):
         self.camera_progress.setFormat(f"{progress_seconds:.1f} / 60.0 s{suffix}")
 
     def _reset_clock_gate(self) -> None:
+        self._clock_gate_generation += 1
         self.clock_validation_record = None
         self.clock_gate_state = "idle"
         self.clock_gate_samples = []
@@ -673,16 +682,24 @@ class QualificationWindow(QMainWindow):
 
     def clock_gate_action(self) -> None:
         if self.clock_gate_state == "correction_required":
+            self._clock_gate_generation += 1
+            generation = self._clock_gate_generation
             self.clock_gate_state = "correcting"
             self.notice.setText("Correcting the idle RTC from Jetson UTC…")
             self.send_command(f"SET_RTC,{int(time.time() + 0.5)}")
+            QTimer.singleShot(3000, lambda: self._clock_correction_timeout(generation))
             self._render()
             return
         self._start_clock_validation(False)
 
+    def _clock_correction_timeout(self, generation: int) -> None:
+        if generation == self._clock_gate_generation and self.clock_gate_state == "correcting":
+            self._fail_clock_gate("RTC_CORRECTION_TIMEOUT", "Controller did not acknowledge RTC correction; retry validation.")
+
     def _start_clock_validation(self, after_correction: bool) -> None:
         if self.port is None or self.state.stage != "RTC":
             return
+        self._clock_gate_generation += 1
         if not after_correction:
             try:
                 status = host_time_status()
@@ -739,12 +756,15 @@ class QualificationWindow(QMainWindow):
         except (serial.SerialException, OSError) as exc:
             self._fail_clock_gate("SERIAL_WRITE_FAILED", str(exc))
             return
-        QTimer.singleShot(3000, lambda expected=sequence: self._clock_sample_timeout(expected))
+        generation = self._clock_gate_generation
+        QTimer.singleShot(3000, lambda: self._clock_sample_timeout(sequence, sent_ns, generation))
 
-    def _clock_sample_timeout(self, expected_sequence: int) -> None:
+    def _clock_sample_timeout(self, expected_sequence: int, sent_ns: int, generation: int) -> None:
         if (
-            self.clock_gate_state.startswith("validating")
+            generation == self._clock_gate_generation
+            and self.clock_gate_state.startswith("validating")
             and self.clock_gate_pending_sequence == expected_sequence
+            and self.clock_gate_pending_sent_ns == sent_ns
         ):
             self._fail_clock_gate("CLOCK_RESPONSE_TIMEOUT", f"sequence={expected_sequence}")
 
@@ -754,6 +774,10 @@ class QualificationWindow(QMainWindow):
         if sequence is None or sent_ns is None:
             return
         try:
+            fields = line.split(",")
+            if len(fields) == 7 and (int(fields[1]) != sequence or int(fields[2]) != sent_ns):
+                self._append_log("Ignoring clock response from an earlier request", "HOST")
+                return
             sample = parse_clock_response(line, sequence, sent_ns, received_ns)
         except (ValueError, TypeError) as exc:
             self._fail_clock_gate("INVALID_CLOCK_RESPONSE", str(exc))
@@ -766,7 +790,9 @@ class QualificationWindow(QMainWindow):
             self.notice.setText(
                 f"Collecting clock sample {count + 1} of {DEFAULT_SAMPLE_COUNT}…"
             )
-            QTimer.singleShot(100, self._send_clock_sample)
+            generation = self._clock_gate_generation
+            QTimer.singleShot(100, lambda: self._send_clock_sample()
+                              if generation == self._clock_gate_generation else None)
         else:
             self._finish_clock_validation()
 
@@ -812,6 +838,7 @@ class QualificationWindow(QMainWindow):
         self._render()
 
     def _fail_clock_gate(self, reason: str, detail: str) -> None:
+        self._clock_gate_generation += 1
         if self.clock_validation_record is None:
             self.clock_validation_record = {}
         self.clock_validation_record.update(result="FAIL", reason=reason, error=detail)

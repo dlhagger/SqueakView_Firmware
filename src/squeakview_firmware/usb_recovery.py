@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """On-demand USB-C enumeration recovery for a dedicated Jetson Orin Nano rig.
 
 Uses the system Python standard library; never opens the controller serial port.
@@ -7,10 +7,12 @@ Run only while the rig is idle, before uploading or starting acquisition.
 
 import argparse
 import fcntl
+import grp
 import os
 from pathlib import Path
 import re
 import signal
+import stat
 import sys
 import time
 
@@ -20,6 +22,26 @@ USB_PORT = Path('/sys/bus/usb/devices/1-1')
 INITIAL_WAIT = 2
 RECOVERY_WAIT = 15
 ATTEMPTS = 3
+SESSION_LOCK = Path('/run/lock/squeakview-controller-usb.lock')
+
+
+def acquire_session_guard():
+    """Share the acquisition owner's USB exclusion lock; never reset in use."""
+    descriptor = os.open(SESSION_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o660)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+            raise RuntimeError('USB session guard must be a root-owned regular file')
+        os.fchown(descriptor, 0, grp.getgrnam('dialout').gr_gid)
+        os.fchmod(descriptor, 0o660)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError('Controller session is active; refusing USB recovery') from exc
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def log(message):
@@ -124,7 +146,11 @@ def main(argv=None):
                              os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, 'r+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return recover(controller)
+            guard = acquire_session_guard()
+            try:
+                return recover(controller)
+            finally:
+                os.close(guard)
     except (OSError, RuntimeError) as exc:
         log(f'USB_FAILED {exc}')
         return 1

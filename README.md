@@ -118,6 +118,15 @@ and installs no service or boot configuration. Run it only with the rig idle.
 This targets the tested Orin Nano USB-C role switch `usb2-0-role-switch` and
 USB device path `1-1`; it is not a general reset for arbitrary USB ports.
 
+SqueakView's `scripts/setup_jetson.sh` can provision a root-owned copy for
+automatic recovery before fresh runs. Both copies share
+`/run/lock/squeakview-controller-usb.lock` with the application's serial owner;
+recovery refuses to reset USB while that connection is owned, even if its
+device node has disappeared. Restart the app after provisioning to activate
+this protection. The helper only restores enumeration; SqueakView separately
+sends STOP and verifies a fresh idle handshake before starting acquisition.
+Repeated STOP commands preserve the stopped session's final frame count.
+
 From the repository directory, no arguments are needed:
 
 ```sh
@@ -244,6 +253,12 @@ uv run mousehouse-setup
 The GUI performs a protocol-version handshake and enables qualification
 controls only for the matching `setup_debug` firmware. Reflash the current
 `setup_debug` build whenever the GUI reports a firmware/protocol mismatch.
+
+Clock samples and RTC-correction acknowledgements have three-second response
+deadlines. A missing correction acknowledgement enables retrying validation;
+the GUI does not automatically repeat an RTC write. Retired attempts and
+disconnected sessions cannot send queued samples or fail a newer attempt with
+an old timeout, and delayed replies from earlier requests are ignored.
 
 By default, records are written beneath `~/MouseHouseQualificationLogs`; the
 destination can be changed before connecting. A completed qualification saves
@@ -543,3 +558,20 @@ attempt logs its captured failure, attempt number, and whether it will retry.
 Persistent faults fail after the third attempt; held channels and readiness
 failures retain their original deadline and never bypass checks. A later manual
 resume starts a fresh bounded request.
+
+Calibration deadlines include sensor I/O time: manual and automatic recovery
+check a fresh monotonic timestamp after readiness reads, and record readiness
+boundaries after those reads. Automatic recovery also checks elapsed time after
+configuration I/O and starts settling from the completed Run verification.
+
+Lick polling reads the unmasked touch-status register so the driver's `0xffff`
+read-failure marker cannot become false touches on both channels. A failed read
+during acquisition leaves counters unchanged, interrupts an in-progress lick,
+and starts the existing bounded recovery with reason `TOUCH_READ_FAILED`.
+Valid `0x0fff` touch data remains valid. Calibration also rejects failed touch
+reads and keeps both channels muted. The wire message format and hardware pin
+assignments are unchanged.
+
+Before deployment, check normal bottle replacement, calibration failure and
+retry, stop during calibration, and sensor-read failure/recovery on a spare rig.
+Native fault tests and compilation do not validate electrical behavior.

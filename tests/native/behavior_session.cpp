@@ -89,6 +89,8 @@ int main(int, char**) {
   m.stopSession();
   assert(!m.running_ && !m.cameraTriggersEnabled());
   assert(m.events.back()=="ACK_STOP" && m.eventCounts.back()==7);
+  m.stopSession();
+  assert(m.events.back()=="ACK_STOP" && m.eventCounts.back()==7);
   assert(m.cameraRecords.back()==MouseHouseProtocolV2::MESSAGE_CAMERA_STOP);
   size_t records=m.cameraRecords.size();
   m.cameraPioReady_=false;

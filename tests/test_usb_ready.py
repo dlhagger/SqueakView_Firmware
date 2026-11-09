@@ -1,6 +1,9 @@
 import unittest
+import fcntl
+import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
@@ -8,6 +11,35 @@ from squeakview_firmware import usb_recovery as usb
 
 
 class UsbReadyTests(unittest.TestCase):
+    def test_shared_guard_refuses_active_host_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            guard = Path(directory) / 'session.lock'
+            guard.touch()
+            info = guard.stat()
+            with guard.open('r') as host:
+                fcntl.flock(host, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with patch.object(usb, 'SESSION_LOCK', guard), \
+                        patch.object(usb.os, 'fstat', return_value=SimpleNamespace(st_uid=0, st_mode=info.st_mode)), \
+                        patch.object(usb.os, 'fchown'), patch.object(usb.os, 'fchmod'):
+                    with self.assertRaisesRegex(RuntimeError, 'session is active'):
+                        usb.acquire_session_guard()
+            with patch.object(usb, 'SESSION_LOCK', guard), \
+                    patch.object(usb.os, 'fstat', return_value=SimpleNamespace(st_uid=0, st_mode=info.st_mode)), \
+                    patch.object(usb.os, 'fchown'), patch.object(usb.os, 'fchmod'):
+                descriptor = usb.acquire_session_guard()
+                os.close(descriptor)
+
+    def test_active_session_prevents_recovery_entirely(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(usb.Controller, 'ready', return_value=False), \
+                patch.object(usb.os, 'geteuid', return_value=0), \
+                patch.object(usb.signal, 'signal'), \
+                patch.object(usb.os, 'open', return_value=os.open(Path(directory) / 'mutex', os.O_CREAT | os.O_RDWR, 0o600)), \
+                patch.object(usb, 'acquire_session_guard', side_effect=RuntimeError('session is active')), \
+                patch.object(usb, 'recover') as recover:
+            self.assertEqual(usb.main([]), 1)
+            recover.assert_not_called()
+
     def test_no_arguments_accepts_detected_board_without_reset(self):
         with patch.object(usb.Controller, 'ready', return_value=True), \
                 patch.object(usb.os, 'open') as open_lock:

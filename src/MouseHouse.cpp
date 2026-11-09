@@ -685,9 +685,7 @@ void MouseHouse::failBottleCalibration(const char* reason, const char* stage,
   }
 }
 
-void MouseHouse::serviceBottleCalibration() {
-  if (bottleSwap_.state != BottleSwapState::CALIBRATING) return;
-  uint64_t now = time_us_64();
+bool MouseHouse::bottleCalibrationDeadlineReached(uint64_t now) {
   if (now - bottleSwap_.boundaryUs >= BottleSwapState::kDeadlineUs) {
     const char* reason = "CAL_READINESS_TIMEOUT";
     uint8_t reg = MPR121_ECR;
@@ -700,6 +698,11 @@ void MouseHouse::serviceBottleCalibration() {
         reg = bottleCalibrationOorL_ ? 0x02 : 0x03;
         expected = 0;
         actual = bottleCalibrationOorL_ ? bottleCalibrationOorL_ : bottleCalibrationOorH_;
+      } else if (bottleCalibrationTouched_ == UINT16_MAX) {
+        reason = "CAL_SENSOR_HEALTH_TIMEOUT";
+        reg = 0x00;
+        expected = 0;
+        actual = bottleCalibrationTouched_;
       } else if (bottleCalibrationTouched_ & ((1 << 1) | (1 << 2))) {
         reason = "CAL_CHANNELS_NOT_RELEASED";
         reg = 0x00;
@@ -708,8 +711,15 @@ void MouseHouse::serviceBottleCalibration() {
       }
     }
     failBottleCalibration(reason, "READINESS", reg, expected, actual);
-    return;
+    return true;
   }
+  return false;
+}
+
+void MouseHouse::serviceBottleCalibration() {
+  if (bottleSwap_.state != BottleSwapState::CALIBRATING) return;
+  uint64_t now = time_us_64();
+  if (bottleCalibrationDeadlineReached(now)) return;
   if (bottleCalibrationRetryPending_) {
     // Retry only on a later service pass. Reassert Stop Mode and reverify all
     // configuration instead of accepting a stale/failed read as readiness.
@@ -757,15 +767,19 @@ void MouseHouse::serviceBottleCalibration() {
     return;
   }
   if (now < nextBottleCalibrationCheckUs_) return;
-  nextBottleCalibrationCheckUs_ = now + 10000ULL;
   // Exact readback detects absent/reset devices as well as stopped electrodes.
   bottleCalibrationEcr_ = cap_.readRegister8(MPR121_ECR);
   bottleCalibrationOorL_ = cap_.readRegister8(0x02);
   bottleCalibrationOorH_ = cap_.readRegister8(0x03);
-  bottleCalibrationTouched_ = cap_.touched();
+  bool touchValid = readLickTouchStatus(bottleCalibrationTouched_);
   bottleCalibrationSampled_ = true;
+  // I2C can consume the remaining deadline. Readiness and its recorded
+  // boundary must use time after the reads, never a cached pre-I/O value.
+  now = time_us_64();
+  if (bottleCalibrationDeadlineReached(now)) return;
+  nextBottleCalibrationCheckUs_ = now + 10000ULL;
   bool healthy = bottleCalibrationEcr_ == 0x8C
-                 && !(bottleCalibrationOorL_ | bottleCalibrationOorH_);
+                 && !(bottleCalibrationOorL_ | bottleCalibrationOorH_) && touchValid;
   bool released = (bottleCalibrationTouched_ & ((1 << 1) | (1 << 2))) == 0;
   if (bottleSwap_.service(now, healthy, released,
                          leftDrinkEvent_.count, rightDrinkEvent_.count)) {
@@ -853,7 +867,7 @@ void MouseHouse::beginLickRecovery(const char* reason, uint8_t reg,
 
 void MouseHouse::serviceLickRecovery() {
   if (!running_ || bottleSwap_.state != BottleSwapState::ACTIVE) return;
-  LickRecovery::Change change = lickRecovery_.service(cap_, time_us_64());
+  LickRecovery::Change change = lickRecovery_.service(cap_, [] { return time_us_64(); });
   if (change == LickRecovery::NONE) return;
   if (change == LickRecovery::READY) {
     lickRecoveryEndCounts_[0] = leftDrinkEvent_.count;
@@ -947,7 +961,8 @@ void MouseHouse::primeTimedBinaryEvent(TimedBinaryEvent& event,
 }
 
 void MouseHouse::syncBehavioralStateToSensors(uint64_t nowUnix) {
-  uint16_t touched = cap_.touched();
+  uint16_t touched = 0;
+  if (!readLickTouchStatus(touched)) touched = 0;
   bool pelletNow = feedPelletSensorTriggered();
 
   primeTimedBinaryEvent(leftPokeEvent_, digitalRead(kLeftPokePin) == LOW, nowUnix);
@@ -1061,9 +1076,23 @@ void MouseHouse::updatePelletWell() {
   prevPelletState_ = pelletNow;
 }
 
+bool MouseHouse::readLickTouchStatus(uint16_t& touched) {
+  // BusIO returns -1 on a failed read; readRegister16 retains 0xffff.
+  // touched() masks that marker to 0x0fff, indistinguishable from touch data.
+  touched = cap_.readRegister16(MPR121_TOUCHSTATUS_L);
+  if (touched == UINT16_MAX) return false;
+  touched &= 0x0FFF;
+  return true;
+}
+
 void MouseHouse::updateLeftDrink() {
   if (bottleSwap_.state != BottleSwapState::ACTIVE || !lickRecovery_.available()) return;
-  bool currentState = cap_.touched() & (1 << 1);
+  uint16_t touched;
+  if (!readLickTouchStatus(touched)) {
+    if (running_) beginLickRecovery("TOUCH_READ_FAILED", MPR121_TOUCHSTATUS_L, 0, UINT16_MAX);
+    return;
+  }
+  bool currentState = touched & (1 << 1);
   if (leftDrinkNeedsRelease_) {
     if (!currentState) leftDrinkNeedsRelease_ = false;
     return;
@@ -1079,7 +1108,12 @@ void MouseHouse::updateLeftDrink() {
 
 void MouseHouse::updateRightDrink() {
   if (bottleSwap_.state != BottleSwapState::ACTIVE || !lickRecovery_.available()) return;
-  bool currentState = cap_.touched() & (1 << 2);
+  uint16_t touched;
+  if (!readLickTouchStatus(touched)) {
+    if (running_) beginLickRecovery("TOUCH_READ_FAILED", MPR121_TOUCHSTATUS_L, 0, UINT16_MAX);
+    return;
+  }
+  bool currentState = touched & (1 << 2);
   if (rightDrinkNeedsRelease_) {
     if (!currentState) rightDrinkNeedsRelease_ = false;
     return;
@@ -2194,6 +2228,7 @@ void MouseHouse::startSession(uint32_t fps, bool triggerCamera) {
 }
 
 void MouseHouse::stopSession() {
+  bool wasRunning = running_;
   bool wasCameraTriggering = running_ && cameraTriggersEnabled_;
   if (feedActive_) {
     feedStop("StopCommand");
@@ -2203,7 +2238,8 @@ void MouseHouse::stopSession() {
   // Disable triggers and capture the final boundary before any sensor I/O.
   stopCameraPio();
   cameraTriggersEnabled_ = false;
-  uint32_t finalFrames = 0;
+  // Repeated STOP must retain the stopped session's final camera count.
+  uint32_t finalFrames = wasRunning ? 0 : (uint32_t)frameCounter_;
   uint64_t firstFrameUs = 0;
   uint64_t lastFrameUs = 0;
   if (wasCameraTriggering) snapshotCameraIrq(finalFrames, firstFrameUs, lastFrameUs);

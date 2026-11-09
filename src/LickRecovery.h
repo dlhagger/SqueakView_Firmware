@@ -34,7 +34,8 @@ public:
     // Explicit operator recalibration grants a fresh recovery budget.
     attempts = 0; windowSet_ = false; nextAttempt_ = now + kCooldownUs;
   }
-  template<class Sensor> Change service(Sensor& cap, uint64_t now) {
+  template<class Sensor, class Clock> Change service(Sensor& cap, Clock clock) {
+    uint64_t now = clock();
     if (state == WAITING) {
       if (now < nextAttempt_) return NONE;
       if (!windowSet_ || now - windowStart_ >= kBudgetWindowUs) {
@@ -48,12 +49,18 @@ public:
       failedRegister = 0; expected = actual = 0;
       cap.writeRegister(0x5E, 0);
       actual = cap.readRegister8(0x5E);
+      now = clock();
+      if (now - attemptStart_ >= kDeadlineUs)
+        return fail(now, "READINESS_TIMEOUT", 0x5E, 0, actual);
       // ECR bits 5:0 enable electrodes/proximity. Bits 7:6 select baseline
       // calibration; 0x40/0x80/0xC0 are valid Stop states, not failed stops.
       if ((actual & 0x3F) != 0) return fail(now, "STOP_VERIFY_FAILED", 0x5E, 0, actual);
       // Stop first: the Adafruit register writer restores the previous ECR
       // after a reset write. The saved value must have no enabled channels.
       cap.writeRegister(0x80, 0x63);
+      now = clock();
+      if (now - attemptStart_ >= kDeadlineUs)
+        return fail(now, "READINESS_TIMEOUT", 0x5E, 0, actual);
       resetPending_ = true; resetReadyAt_ = now + 3000ULL;
       return ATTEMPT;
     }
@@ -64,8 +71,14 @@ public:
       if (now < resetReadyAt_) return NONE;
       resetPending_ = false;
       uint8_t config = cap.readRegister8(0x5D);
+      now = clock();
+      if (now - attemptStart_ >= kDeadlineUs)
+        return fail(now, "READINESS_TIMEOUT", 0x5D, 0x24, config);
       if (config != 0x24) return fail(now, "RESET_VERIFY_FAILED", 0x5D, 0x24, config);
       uint8_t ecr = cap.readRegister8(0x5E);
+      now = clock();
+      if (now - attemptStart_ >= kDeadlineUs)
+        return fail(now, "READINESS_TIMEOUT", 0x5E, 0, ecr);
       // The register writer can restore the saved calibration bits after
       // soft reset. Confirm Stop mode independently of those upper bits.
       if ((ecr & 0x3F) != 0) return fail(now, "STOP_VERIFY_FAILED", 0x5E, 0, ecr);
@@ -75,23 +88,31 @@ public:
       uint8_t reg, value; setting(cursor++, reg, value);
       cap.writeRegister(reg, value);
       uint8_t readback = cap.readRegister8(reg);
+      now = clock();
+      if (now - attemptStart_ >= kDeadlineUs)
+        return fail(now, "READINESS_TIMEOUT", reg, value, readback);
       if (readback != value) return fail(now, "REGISTER_VERIFY_FAILED", reg, value, readback);
       if (reg == 0x5E) { runStarted_ = true; runAt_ = now; nextRead_ = now + kSettleUs; }
       return NONE;
     }
     if (!runStarted_ || now < nextRead_) return NONE;
-    nextRead_ = now + 10000ULL;
     uint8_t ecr = cap.readRegister8(0x5E);
     uint8_t low = cap.readRegister8(0x02), high = cap.readRegister8(0x03);
-    uint16_t touch = cap.touched();
-    bool healthy = ecr == 0x8C && !(low | high);
+    uint16_t rawTouch = cap.readRegister16(0x00);
+    uint16_t touch = rawTouch & 0x0FFF;
+    now = clock();
+    if (now - attemptStart_ >= kDeadlineUs)
+      return fail(now, "READINESS_TIMEOUT", failedRegister, expected, actual);
+    nextRead_ = now + 10000ULL;
+    bool healthy = ecr == 0x8C && !(low | high) && rawTouch != UINT16_MAX;
     bool clear = !(touch & 0x06);
     if (!healthy || !clear) {
       released_ = false;
-      failedRegister = !healthy ? (ecr != 0x8C ? 0x5E : (low ? 0x02 : 0x03)) : 0x00;
+      failedRegister = ecr != 0x8C ? 0x5E : low ? 0x02 : high ? 0x03 : 0x00;
       expected = failedRegister == 0x5E ? 0x8C : 0;
-      actual = failedRegister == 0x5E ? ecr : failedRegister == 0x02 ? low : failedRegister == 0x03 ? high : touch;
-      reason = !healthy ? "SENSOR_NOT_HEALTHY" : "CHANNELS_NOT_RELEASED";
+      actual = failedRegister == 0x5E ? ecr : failedRegister == 0x02 ? low : failedRegister == 0x03 ? high : rawTouch;
+      reason = rawTouch == UINT16_MAX ? "TOUCH_READ_FAILED" :
+          !healthy ? "SENSOR_NOT_HEALTHY" : "CHANNELS_NOT_RELEASED";
       return NONE;
     }
     if (!released_) { released_ = true; releasedAt_ = now; }

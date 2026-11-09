@@ -283,6 +283,7 @@ private:
   void queueBottleState();
   void muteDrinkEvents(const char* reason);
   void serviceBottleCalibration();
+  bool bottleCalibrationDeadlineReached(uint64_t now);
 
   unsigned long lastMpr121Check_ = 0;
   LickRecovery lickRecovery_;
@@ -363,6 +364,7 @@ private:
   void updateRightPoke();
   void updatePelletWell();
   void updateLeftDrink();
+  bool readLickTouchStatus(uint16_t& touched);
   void updateRightDrink();
 
   void disableFeederOutputs();

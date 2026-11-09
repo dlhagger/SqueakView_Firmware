@@ -40,6 +40,8 @@ class NativeFirmwareTests(unittest.TestCase):
         for signature in (
             "void MouseHouse::handleBottleCommand(",
             "void MouseHouse::serviceBottleCalibration()",
+            "bool MouseHouse::bottleCalibrationDeadlineReached(",
+            "bool MouseHouse::readLickTouchStatus(",
             "void MouseHouse::failBottleCalibration(",
             "void MouseHouse::queueBottleState()", "void MouseHouse::muteDrinkEvents(",
             "void MouseHouse::stopSession()",
@@ -152,3 +154,9 @@ class NativeFirmwareTests(unittest.TestCase):
 
     def test_production_calibration_register_failures_readiness_and_manual_retry(self):
         self.run_native("bottle_calibration", 0)
+
+    def test_calibration_deadlines_include_sensor_io_time(self):
+        self.run_native("bottle_calibration", 1)
+
+    def test_failed_touch_reads_cannot_increment_licks_and_recovery_remains_bounded(self):
+        self.run_native("bottle_calibration", 2)

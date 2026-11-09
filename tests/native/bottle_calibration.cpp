@@ -23,7 +23,7 @@ struct SerialTransport {
   bool overflowLatched() { return false; }
   bool v2EnabledOrPending() { return true; }
 };
-constexpr uint8_t MPR121_ECR=0x5E, MPR121_TOUCHTH_0=0x41, MPR121_DEBOUNCE=0x5B;
+constexpr uint8_t MPR121_ECR=0x5E, MPR121_TOUCHTH_0=0x41, MPR121_DEBOUNCE=0x5B, MPR121_TOUCHSTATUS_L=0;
 class MouseHouse {
 public:
   BottleSwapState bottleSwap_;
@@ -41,6 +41,8 @@ public:
   void checkMPR121Health();
   void setLickRecoveryTouchTimeoutMs(uint32_t);
   void updateLeftDrink(); void updateRightDrink();
+  bool readLickTouchStatus(uint16_t&);
+  bool bottleCalibrationDeadlineReached(uint64_t);
   SerialTransport transport_;
   bool running_=true, leftDrinkNeedsRelease_=false, rightDrinkNeedsRelease_=false;
   bool cameraTriggersEnabled_=false, feedActive_=false, compatibilitySerialMode_=false;
@@ -76,9 +78,12 @@ public:
     int badReg=-1;
     unsigned reads[256]{};
     uint16_t touches=0;
+    bool touchReadFails=false;
+    uint64_t readDelayUs=0, writeDelayUs=0;
     std::vector<std::pair<uint8_t,uint8_t>> writes;
     Cap() { regs[MPR121_ECR]=0x8C; }
     uint8_t readRegister8(uint8_t reg) {
+      testUs+=readDelayUs;
       ++reads[reg];
       if (reg==MPR121_ECR && ecrReadFailures) {
         --ecrReadFailures;
@@ -93,6 +98,7 @@ public:
       return reg==badReg ? uint8_t(regs[reg]^0xFF) : regs[reg];
     }
     void writeRegister(uint8_t reg, uint8_t value) {
+      testUs+=writeDelayUs;
       writes.emplace_back(reg,value);
       if (reg==MPR121_ECR && value==0) {
         if (failStop) return;
@@ -106,7 +112,12 @@ public:
         regs[MPR121_ECR]=resetEcrReadback;
       } else regs[reg]=value;
     }
-    uint16_t touched() { return touches; }
+    uint16_t readRegister16(uint8_t reg) {
+      assert(reg==MPR121_TOUCHSTATUS_L);
+      testUs+=readDelayUs;
+      return touchReadFails ? UINT16_MAX : touches;
+    }
+    uint16_t touched() { return readRegister16(MPR121_TOUCHSTATUS_L)&0x0fff; }
     uint16_t filteredData(uint8_t) { return 500; }
     uint16_t baselineData(uint8_t) { return 504; }
   } cap_;
@@ -194,7 +205,138 @@ void exhaust(MouseHouse& m) {
     m.serviceBottleCalibration();
   assert(m.bottleCalibrationAttempt_==3);
 }
-int main(int,char**) {
+void automaticProgram(MouseHouse& m) {
+  m.beginLickRecovery("SESSION_START"); m.serviceLickRecovery();
+  testUs+=3000; m.serviceLickRecovery();
+  for(unsigned i=0;i<LickRecovery::kRegisterCount;++i) m.serviceLickRecovery();
+}
+
+int deadlineFaults() {
+  {
+    MouseHouse m; begin(m); program(m);
+    uint64_t start=m.bottleSwap_.boundaryUs;
+    testUs=m.nextBottleCalibrationCheckUs_; m.serviceBottleCalibration();
+    testUs=start+9900000; m.cap_.readDelayUs=100000;
+    m.serviceBottleCalibration();
+    assert(testUs-start>10000000);
+    failed(m,"CAL_READINESS_TIMEOUT","READINESS");
+    assert(m.bottleSwap_.boundaryUs-start>=10000000);
+    m.cap_.readDelayUs=0;
+    m.handleBottleCommand((std::string("BOTTLE_RESUME,")+id).c_str());
+    program(m); ready(m); // Deadline failure remains manually recoverable.
+  }
+  {
+    MouseHouse m; begin(m); program(m);
+    uint64_t start=m.bottleSwap_.boundaryUs;
+    testUs=m.nextBottleCalibrationCheckUs_; m.serviceBottleCalibration();
+    testUs=start+1000000; m.cap_.readDelayUs=100000;
+    m.serviceBottleCalibration();
+    assert(m.bottleSwap_.state==BottleSwapState::ACTIVE);
+    assert(m.bottleSwap_.boundaryUs>=start+1400000); // Post-read, not pre-read timestamp.
+  }
+  {
+    MouseHouse m; automaticProgram(m);
+    uint64_t start=m.lickRecovery_.gapStart;
+    testUs=start+1000000; m.serviceLickRecovery();
+    testUs=start+9900000; m.cap_.readDelayUs=100000;
+    m.serviceLickRecovery();
+    assert(!m.lickRecovery_.available());
+    assert(std::string(m.lickRecovery_.reason)=="READINESS_TIMEOUT");
+    assert(m.events.back().type=="LICK_RECOVERY_RETRY");
+  }
+  {
+    MouseHouse m; automaticProgram(m);
+    uint64_t start=m.lickRecovery_.gapStart;
+    testUs=start+1000000; m.serviceLickRecovery();
+    testUs+=500000; m.cap_.readDelayUs=100000; m.serviceLickRecovery();
+    assert(m.lickRecovery_.available());
+    assert(m.lickRecovery_.gapEnd>=start+1900000);
+  }
+  // A slow configuration write must not declare Run/start its settle timer
+  // from an expired attempt, even if register readback succeeds.
+  {
+    MouseHouse m;
+    m.beginLickRecovery("SESSION_START"); m.serviceLickRecovery();
+    uint64_t start=m.lickRecovery_.gapStart;
+    testUs+=3000; m.serviceLickRecovery();
+    for(unsigned i=0;i<LickRecovery::kRegisterCount-1;++i) m.serviceLickRecovery();
+    testUs=start+9900000; m.cap_.writeDelayUs=200000;
+    m.serviceLickRecovery();
+    assert(!m.lickRecovery_.available());
+    assert(std::string(m.lickRecovery_.reason)=="READINESS_TIMEOUT");
+  }
+  return 0;
+}
+
+int touchFaults() {
+  for(bool rightFirst : {false,true}) {
+    MouseHouse m; m.leftDrinkEvent_.count=21; m.rightDrinkEvent_.count=16;
+    m.cap_.touchReadFails=true;
+    if(rightFirst) m.updateRightDrink(); else m.updateLeftDrink();
+    m.updateLeftDrink(); m.updateRightDrink();
+    assert(m.leftDrinkEvent_.count==21 && m.rightDrinkEvent_.count==16);
+    assert(m.lickRecovery_.busy());
+    assert(std::string(m.lickRecovery_.cause)=="TOUCH_READ_FAILED");
+    assert(m.leftDrinkNeedsRelease_ && m.rightDrinkNeedsRelease_);
+    assert(m.lickRecovery_.actual==UINT16_MAX);
+    for(const auto& e:m.events) assert(e.type!="DRINK_START");
+    m.cap_.touchReadFails=false; m.cap_.touches=0;
+    for(unsigned tick=0;tick<200 && !m.lickRecovery_.available();++tick) {
+      testUs+=10000; m.serviceLickRecovery();
+    }
+    assert(m.lickRecovery_.available());
+    m.cap_.touches=6; m.updateLeftDrink(); m.updateRightDrink();
+    assert(m.leftDrinkEvent_.count==22 && m.rightDrinkEvent_.count==17);
+  }
+  {
+    MouseHouse m; m.cap_.touches=0x0fff; // Valid touch bits must not be rejected.
+    m.updateLeftDrink(); m.updateRightDrink();
+    assert(m.leftDrinkEvent_.count==1 && m.rightDrinkEvent_.count==1);
+    assert(m.lickRecovery_.available());
+  }
+  {
+    MouseHouse m; m.cap_.touches=2; m.updateLeftDrink();
+    assert(m.leftDrinkEvent_.count==1 && m.leftDrinkEvent_.previousState);
+    m.cap_.touchReadFails=true; m.updateLeftDrink();
+    assert(m.leftDrinkEvent_.count==1 && !m.leftDrinkEvent_.previousState);
+    bool interrupted=false;
+    for(const auto& event:m.events) {
+      assert(event.type!="DRINK_END");
+      if(event.type=="DRINK_INTERRUPTED") interrupted=true;
+    }
+    assert(interrupted && m.lickRecovery_.busy());
+  }
+  {
+    MouseHouse m; m.running_=false; m.cap_.touchReadFails=true;
+    m.updateLeftDrink(); m.updateRightDrink();
+    assert(m.leftDrinkEvent_.count==0 && m.rightDrinkEvent_.count==0);
+    assert(m.lickRecovery_.available() && m.events.empty());
+  }
+  {
+    MouseHouse m; begin(m); program(m); m.cap_.touchReadFails=true;
+    testUs=m.nextBottleCalibrationCheckUs_; m.serviceBottleCalibration();
+    assert(m.bottleSwap_.state==BottleSwapState::CALIBRATING);
+    testUs=m.bottleSwap_.boundaryUs+BottleSwapState::kDeadlineUs;
+    m.serviceBottleCalibration();
+    failed(m,"CAL_SENSOR_HEALTH_TIMEOUT","register=0x00,expected=0x0000,actual=0xffff");
+  }
+  {
+    MouseHouse m; automaticProgram(m); m.cap_.touchReadFails=true;
+    for(unsigned tick=0;tick<500 && m.lickRecovery_.state!=LickRecovery::FAILED;++tick) {
+      testUs+=100000; m.serviceLickRecovery();
+    }
+    assert(m.lickRecovery_.state==LickRecovery::FAILED);
+    assert(m.lickRecovery_.attempts==3);
+    assert(m.leftDrinkEvent_.count==0 && m.rightDrinkEvent_.count==0);
+    m.cap_.touchReadFails=false; begin(m); program(m); ready(m);
+    assert(m.lickRecovery_.available());
+  }
+  return 0;
+}
+
+int main(int argc,char** argv) {
+  if(argc>1 && strcmp(argv[1],"1")==0) return deadlineFaults();
+  if(argc>1 && strcmp(argv[1],"2")==0) return touchFaults();
   // Exercise every ECR byte in both production Stop-verification paths.
   // Only 00/40/80/C0 mean stopped; any electrode/proximity bit must fail.
   for (unsigned raw=0;raw<256;++raw) {
