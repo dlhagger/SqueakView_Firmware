@@ -19,6 +19,7 @@ public:
   // position, so the default 1200-step feed moves the disk 180 degrees.
   static constexpr int kDefaultFeedSteps = 1200;
   using SerialCommandHandler = bool (*)(const char* command);
+  using StopHandler = void (*)();
 
   enum PelletSensorMode {
     PELLET_SENSOR_LATCHED_PRESENCE,
@@ -57,6 +58,9 @@ public:
                              HouseLightTimeBasis timeBasis = HOUSE_LIGHT_RTC_TIME);
   void setCompatibilitySerialMode(bool enabled);
   void setSerialCommandHandler(SerialCommandHandler handler);
+  // Runs after outputs stop, for every STOP (including idle STOP). Must not
+  // start hardware or recursively call stopSession().
+  void setStopHandler(StopHandler handler) { stopHandler_ = handler; }
   void setTaskContext(const char* context);
   bool emitLegacyLine(const char* line);
   void logEvent(const char* eventType,
@@ -114,6 +118,7 @@ public:
   void leftPokeLightOff();
 
 private:
+  StopHandler stopHandler_ = nullptr;
   struct TimedBinaryEvent {
     bool previousState = false;
     uint64_t startTime = 0;

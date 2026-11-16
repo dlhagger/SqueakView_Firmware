@@ -26,6 +26,7 @@ struct SerialTransport {
 constexpr uint8_t MPR121_ECR=0x5E, MPR121_TOUCHTH_0=0x41, MPR121_DEBOUNCE=0x5B, MPR121_TOUCHSTATUS_L=0;
 class MouseHouse {
 public:
+  void (*stopHandler_)() = nullptr;
   BottleSwapState bottleSwap_;
   LickRecovery lickRecovery_;
   unsigned long lickRecoveryEndCounts_[2]={0,0};
@@ -50,6 +51,10 @@ public:
   uint64_t frameCounter_=0;
   static constexpr const char* kNanString="nan";
   void stopSession();
+  bool clearFeedJam();
+  bool feedJammed_=false;
+  static constexpr int kFeedStepDirection=-1;
+  int feedPreferredStepDirection_=kFeedStepDirection;
   void stopCameraPio() {}
   void snapshotCameraIrq(uint32_t&, uint64_t&, uint64_t&) {}
   void feedStop(const char*) { feedActive_=false; }

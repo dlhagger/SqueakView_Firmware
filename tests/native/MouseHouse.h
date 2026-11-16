@@ -1,6 +1,8 @@
 #pragma once
 #include "Arduino.h"
 #include <string>
+#include <cstring>
+#include "SerialTransport.h"
 
 class MouseHouse {
 public:
@@ -9,15 +11,38 @@ public:
   enum HouseLightTimeBasis { HOUSE_LIGHT_US_EASTERN };
   bool leftEnded = false, rightEnded = false;
   bool running = false, feeding = false, jammed = false, rejectFeed = false;
+  bool& running_ = running;
+  bool compatibility = false;
+  void (*stopHandler_)() = nullptr;
+  bool (*commandHandler_)(const char*) = nullptr;
+  SerialTransport transport_;
+  static constexpr size_t kSerialCmdBufferSize = 96;
+  char serialCmdBuffer_[kSerialCmdBufferSize]{};
+  size_t serialCmdLength_ = 0;
+  bool serialCmdOverflow_ = false;
+  void checkSerialCommands();
+  void resetSerialCommandBuffer();
+  void sendCommandError(const char*, const char*) { loggedEvents.emplace_back("NACK"); }
+  void handleSerialCommand(const char* command) {
+    if (strcmp(command, "STOP") == 0) stopSession();
+    else if (strncmp(command, "START,", 6) == 0 || strcmp(command, "START_BEHAVIOR") == 0) {
+      if (running) { loggedEvents.emplace_back("NACK"); return; }
+      running = true;
+      cameraTriggers = strncmp(command, "START,", 6) == 0;
+      if (!compatibility || !cameraTriggers)
+        loggedEvents.emplace_back(cameraTriggers ? "ACK_START" : "ACK_START_BEHAVIOR");
+    } else if (commandHandler_) commandHandler_(command);
+  }
   bool cameraTriggers = true;
   std::vector<std::string> loggedEvents;
+  std::vector<long> eventValues;
   bool pellet = false, blocked = false, timeout = false;
   bool left = false, right = false, mainLight = false;
   bool leftLight = false, rightLight = false;
   unsigned feedStarts = 0, stops = 0;
 
   void begin() {}
-  void update() {}
+  void update() { checkSerialCommands(); }
   bool isRunning() const { return running; }
   bool cameraTriggersEnabled() const { return running && cameraTriggers; }
   bool isFeedActive() const { return feeding; }
@@ -47,21 +72,33 @@ public:
     feeding = true;
     ++feedStarts;
   }
-  void stopSession() { running = feeding = timeout = false; ++stops; }
+  void stopSession() {
+    running = feeding = timeout = jammed = false;
+    ++stops;
+    if (stopHandler_) stopHandler_();
+    loggedEvents.emplace_back("ACK_STOP");
+  }
+  void setStopHandler(void (*handler)()) { stopHandler_ = handler; }
   template <typename... Args> void setMainStrip(Args...) { mainLight = true; }
   template <typename... Args> void leftPokeLightOn(Args...) { leftLight = true; }
   template <typename... Args> void rightPokeLightOn(Args...) { rightLight = true; }
   void clearMainStrip() { mainLight = false; }
   void leftPokeLightOff() { leftLight = false; }
   void rightPokeLightOff() { rightLight = false; }
-  template <typename... Args> void logEvent(const char* event, Args...) {
+  void logEvent(const char* event, uint64_t, uint64_t, const char*, unsigned long,
+                uint64_t, uint64_t, long value, const char*, const char*) {
     loggedEvents.emplace_back(event);
+    eventValues.push_back(value);
   }
   template <typename... Args> void playTone(Args...) {}
   template <typename... Args> void startTimeout(Args...) { timeout = true; }
-  void setCompatibilitySerialMode(bool) {}
+  void setCompatibilitySerialMode(bool enabled) { compatibility = enabled; }
   void setTaskContext(const char*) {}
   void setPelletSensorMode(PelletSensorMode) {}
   void setSensorPollingWhileStopped(bool) {}
-  void setSerialCommandHandler(bool (*)(const char*)) {}
+  void setSerialCommandHandler(bool (*handler)(const char*)) { commandHandler_ = handler; }
 };
+
+// These are extracted verbatim from production; only command effects/hardware
+// are stubbed above, so task tests exercise the actual batching boundaries.
+#include "command_methods.inc"

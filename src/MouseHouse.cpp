@@ -526,8 +526,16 @@ void MouseHouse::checkSerialCommands() {
         sendCommandError("UNKNOWN", "COMMAND_TOO_LONG");
       } else if (serialCmdLength_ > 0) {
         serialCmdBuffer_[serialCmdLength_] = '\0';
+        bool wasRunning = running_;
+        bool stopCommand = strcmp(serialCmdBuffer_, "STOP") == 0;
         handleSerialCommand(serialCmdBuffer_);
         commandsDispatched++;
+        // Let every task observe lifecycle boundaries before dispatching a
+        // queued restart. Idle STOP is a boundary for delayed task work too.
+        if (wasRunning != running_ || stopCommand) {
+          resetSerialCommandBuffer();
+          return;
+        }
       }
       resetSerialCommandBuffer();
       continue;
@@ -2234,6 +2242,9 @@ void MouseHouse::stopSession() {
     feedStop("StopCommand");
     feedRetryCount_ = 0;
   }
+  // STOP is also a jam-reset boundary, even when already idle. Stop any
+  // active feed first so clearing the latch can never leave the motor running.
+  clearFeedJam();
 
   // Disable triggers and capture the final boundary before any sensor I/O.
   stopCameraPio();
@@ -2264,7 +2275,11 @@ void MouseHouse::stopSession() {
                       (uint32_t)frameCounter_, lastFrameUs);
   }
 
-  if (!compatibilitySerialMode_) {
+  // Task-owned delayed work must be cancelled before acknowledging STOP.
+  if (stopHandler_ != nullptr) stopHandler_();
+
+  // STOP has one owner in every mode, including idle/repeated commands.
+  {
     uint64_t nowUnix = getTimestampUs();
     uint64_t nowUs = time_us_64();
 

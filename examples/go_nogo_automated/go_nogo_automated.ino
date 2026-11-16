@@ -558,7 +558,7 @@ void logTrialResultNow(int side, uint64_t eventUnix, uint64_t duration_us, bool 
            getPhaseTrialReason());
 }
 
-void rewardTrialNow(int side, uint64_t eventUnix, uint64_t duration_us) {
+void rewardTrialNow(int side, uint64_t eventUnix, uint64_t duration_us, bool stillHeld = true) {
   if (trainingPhase == PHASE_3_NOGO ||
       (trainingPhase == PHASE_4_GO_MIX && currentTrialType == TRIAL_NOGO)) {
     noGoTrialCount++;
@@ -569,6 +569,10 @@ void rewardTrialNow(int side, uint64_t eventUnix, uint64_t duration_us) {
   logTrialResultNow(side, eventUnix, duration_us, true);
   registerRewardFeedStart();
   finalizeResolvedTrial(side);
+  if (!stillHeld) {
+    waitingForRelease = false;
+    waitingForReleaseSide = -1;
+  }
 }
 
 void rewardGoTrialOnPokeEnd(int side, uint64_t eventUnix, uint64_t duration_us) {
@@ -706,7 +710,12 @@ void resolveTrialOnPokeEnd(int side, uint64_t pokeEndUnix, uint64_t pokeStartUni
     correct = (cueElapsed < (GO_TIME_MS * 1000ULL));
   } else if (currentTrialType == TRIAL_NOGO) {
     uint64_t cueElapsed = time_us_64() - trialCueStart_us;
-    correct = (cueElapsed > (NOGO_TIME_MS * 1000ULL));
+    correct = (cueElapsed >= (NOGO_TIME_MS * 1000ULL));
+  }
+
+  if (correct && currentTrialType == TRIAL_NOGO) {
+    rewardTrialNow(side, pokeEndUnix, duration_us, false);
+    return;
   }
 
   if (currentTrialType == TRIAL_NOGO) {
@@ -854,15 +863,7 @@ void handleSessionStop() {
   syncPokeStatesToCurrent();
   set_trial_available_off();
 
-  logEvent("ACK_STOP",
-           get_timestamp_us(), time_us_64(),
-           NAN_STR,
-           mh.frameCounter(),
-           NAN_INT,
-           NAN_INT,
-           NAN_INT,
-           getPokeContext(),
-           NAN_STR);
+  // MouseHouse acknowledges every STOP, including idle/repeated commands.
 }
 
 void setup() {

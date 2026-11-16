@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+import tempfile
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -138,6 +141,7 @@ class QualificationWindow(QMainWindow):
         self.transcript: list[str] = []
         self.transcript_path: Path | None = None
         self.saved_record_line = ""
+        self.pending_record_line = ""
         self.output_directory = Path.home() / "MouseHouseQualificationLogs"
         self.check_items: dict[str, QTreeWidgetItem] = {}
         self.clock_validation_record: dict[str, object] | None = None
@@ -343,11 +347,14 @@ class QualificationWindow(QMainWindow):
         utility = QHBoxLayout()
         self.status_button = QPushButton("Refresh status")
         self.status_button.clicked.connect(lambda: self.send_command("TEST,STATUS"))
+        self.save_record_button = QPushButton("Retry saving record")
+        self.save_record_button.clicked.connect(self.retry_save_record)
         self.restart_button = QPushButton("Restart qualification")
         self.restart_button.clicked.connect(self.restart_qualification)
         self.abort_button = QPushButton("Abort")
         self.abort_button.clicked.connect(lambda: self.send_command("TEST,ABORT"))
         utility.addWidget(self.status_button)
+        utility.addWidget(self.save_record_button)
         utility.addStretch()
         utility.addWidget(self.restart_button)
         utility.addWidget(self.abort_button)
@@ -417,6 +424,10 @@ class QualificationWindow(QMainWindow):
         if self.port is not None:
             self.disconnect_serial()
             return
+        if self.pending_record_line:
+            self.retry_save_record()
+            if self.pending_record_line:
+                return
         device = self.port_combo.currentData()
         if not device:
             QMessageBox.warning(self, "No serial device", "Connect the board and refresh the device list.")
@@ -433,6 +444,7 @@ class QualificationWindow(QMainWindow):
         self.rx_buffer.clear()
         self.transcript.clear()
         self.saved_record_line = ""
+        self.pending_record_line = ""
         self.connection_issue = ""
         self._reset_clock_gate()
         self.output_directory = Path(self.output_edit.text()).expanduser()
@@ -592,9 +604,11 @@ class QualificationWindow(QMainWindow):
                     "Firmware/GUI protocol mismatch. Flash the current setup_debug firmware."
                 )
         elif event == "record":
-            self._save_final_record(line)
             result = (self.state.final_record or {}).get("result", "UNKNOWN")
-            self.notice.setText(f"Qualification {result}. Record saved locally.")
+            if self._save_final_record(line):
+                self.notice.setText(f"Qualification {result}. Record saved locally.")
+            else:
+                self.notice.setText(f"Qualification {result}. Record NOT saved; choose a writable directory and retry saving.")
         self._render()
 
     def send_command(self, command: str) -> None:
@@ -871,18 +885,40 @@ class QualificationWindow(QMainWindow):
             except OSError as exc:
                 self.log_path_label.setText(f"Log write failed: {exc}")
 
-    def _save_final_record(self, line: str) -> None:
-        if line == self.saved_record_line:
+    def retry_save_record(self) -> None:
+        if self.state.final_record is None:
             return
-        self.saved_record_line = line
+        self.output_directory = Path(self.output_edit.text()).expanduser()
+        line = self.pending_record_line
+        if line and self._save_final_record(line):
+            self.notice.setText("Qualification record saved locally.")
+        self._render()
+
+    @staticmethod
+    def _write_record_file(path: Path, content: str) -> None:
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _save_final_record(self, line: str) -> bool:
+        if line == self.saved_record_line:
+            return True
+        self.pending_record_line = line
         record = self.state.final_record or {}
         safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", record.get("device", "unknown"))
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         try:
             self.output_directory.mkdir(parents=True, exist_ok=True)
-            base = self.output_directory / f"{safe_id}_{stamp}_qualification"
-            base.with_suffix(".txt").write_text(line + "\n", encoding="utf-8")
-            base.with_suffix(".json").write_text(
+            base = self.output_directory / f"{safe_id}_{stamp}_{uuid.uuid4().hex}_qualification"
+            self._write_record_file(base.with_suffix(".txt"), line + "\n")
+            self._write_record_file(base.with_suffix(".json"),
                 json.dumps(
                     {
                         "record": record,
@@ -893,13 +929,17 @@ class QualificationWindow(QMainWindow):
                     indent=2,
                 )
                 + "\n",
-                encoding="utf-8",
             )
+            self.saved_record_line = line
+            self.pending_record_line = ""
             self.log_path_label.setText(f"Saved: {base}.json")
+            return True
         except OSError as exc:
             QMessageBox.critical(self, "Could not save qualification record", str(exc))
+            return False
 
     def _render(self) -> None:
+        self.save_record_button.setVisible(bool(self.pending_record_line))
         connected = self.port is not None
         protocol_ok = (
             connected

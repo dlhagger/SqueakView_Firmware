@@ -26,8 +26,13 @@ struct SerialTransport {
 };
 class MouseHouse {
 public:
+  void (*stopHandler_)() = nullptr;
   void startSession(uint32_t fps, bool triggerCamera=true);
   void stopSession();
+  bool clearFeedJam();
+  bool feedJammed_=false;
+  static constexpr int kFeedStepDirection=-1;
+  int feedPreferredStepDirection_=kFeedStepDirection;
   void update();
   void drainCameraEvents();
   bool cameraTriggersEnabled() const;
@@ -79,6 +84,44 @@ public:
 #include "session_methods.inc"
 
 int main(int, char**) {
+  static MouseHouse* stopping = nullptr;
+  static unsigned notifications = 0;
+  // STOP clears a latched jam in either session mode and while already idle,
+  // including compatibility mode. Clearing alone must still reject active feed.
+  for (bool compatibility : {false, true}) {
+    for (int mode : {0, 1, 2}) { // idle, triggered, behavior-only
+      for (bool activeFeed : {false, true}) {
+        MouseHouse jam;
+        stopping = &jam;
+        notifications = 0;
+        jam.stopHandler_ = [] {
+          assert(!stopping->running_ && !stopping->feedActive_);
+          assert(!stopping->feedJammed_ && !stopping->cameraTriggersEnabled());
+          ++notifications;
+        };
+        jam.compatibilitySerialMode_=compatibility;
+        if (mode) jam.startSession(mode==1 ? 30 : 0, mode==1);
+        jam.feedJammed_=true;
+        jam.feedActive_=activeFeed;
+        jam.feedRetryCount_=3;
+        jam.feedPreferredStepDirection_=1;
+        if (activeFeed) {
+          assert(!jam.clearFeedJam());
+          assert(jam.feedJammed_ && jam.feedActive_);
+        }
+        jam.stopSession();
+        assert(notifications == 1);
+        assert(!jam.running_ && !jam.feedActive_ && !jam.feedJammed_);
+        assert(jam.feedRetryCount_==0);
+        assert(jam.feedPreferredStepDirection_==MouseHouse::kFeedStepDirection);
+        assert(jam.events.back()=="ACK_STOP");
+        jam.stopSession();
+        assert(notifications == 2 && jam.events.back() == "ACK_STOP");
+        assert(!jam.feedJammed_ && !jam.feedActive_ && !jam.running_);
+      }
+    }
+  }
+
   MouseHouse m;
   m.startSession(30);
   assert(m.running_ && m.cameraTriggersEnabled() && m.cameraStarts==1);

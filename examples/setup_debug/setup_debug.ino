@@ -347,6 +347,22 @@ void allPixelsOff() {
   mh.clearMainStrip(); mh.rightPokeLightOff(); mh.leftPokeLightOff();
 }
 
+void handleStop() {
+  // An idle STOP must also cancel the pre-feed delay. Abort motor stages so
+  // a poke edge sampled in this same update cannot re-arm the test.
+  bool motorTest = feedTestMode != FEED_TEST_NONE || stage == STAGE_FEED_DARK
+                   || stage == STAGE_FEED_LIGHT || stage == STAGE_JAM;
+  feedTestMode = FEED_TEST_NONE;
+  feedTestPhase = FEED_PHASE_NONE;
+  feedTestDueMs = 0;
+  feedResult = FEED_RESULT_NONE;
+  if (motorTest) {
+    pendingResponse = RESPONSE_NONE;
+    allPixelsOff();
+    if (stage != STAGE_ABORTED) setStage(STAGE_ABORTED);
+  }
+}
+
 void allPixels(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   mh.setMainStrip(r, g, b, w);
   mh.rightPokeLightOn(r, g, b, w);
@@ -488,7 +504,7 @@ void serviceResponse() {
     cameraRunObserved = false;
     mh.stopSession();
     allPixelsOff();
-    setStage(STAGE_ABORTED);
+    if (stage != STAGE_ABORTED) setStage(STAGE_ABORTED);
     return;
   }
   bool yes = response == RESPONSE_YES;
@@ -612,6 +628,7 @@ void printStatus() {
 
 void setup() {
   mh.setSerialCommandHandler(handleSetupCommand);
+  mh.setStopHandler(handleStop);
   mh.begin();
   mh.setPelletSensorMode(PELLET_SENSOR_MODE);
   mh.setSensorPollingWhileStopped(true);

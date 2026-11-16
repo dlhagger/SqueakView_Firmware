@@ -21,9 +21,19 @@ class NativeFirmwareTests(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.build = Path(cls.temporary.name)
         source = (ROOT / "src/MouseHouse.cpp").read_text()
+        command_methods = []
+        for signature in ("void MouseHouse::checkSerialCommands()", "void MouseHouse::resetSerialCommandBuffer()"):
+            start = source.index(signature)
+            opening = source.index("{", start)
+            depth, closing = 1, opening + 1
+            while depth:
+                depth += (source[closing] == "{") - (source[closing] == "}")
+                closing += 1
+            command_methods.append(source[start:closing])
+        (cls.build / "command_methods.inc").write_text("\n".join(command_methods))
         methods = []
         for signature in (
-            "void MouseHouse::startSession(", "void MouseHouse::stopSession()",
+            "void MouseHouse::startSession(", "void MouseHouse::stopSession()", "bool MouseHouse::clearFeedJam()",
             "void MouseHouse::update()", "void MouseHouse::drainCameraEvents()",
             "bool MouseHouse::cameraTriggersEnabled() const",
         ):
@@ -44,7 +54,7 @@ class NativeFirmwareTests(unittest.TestCase):
             "bool MouseHouse::readLickTouchStatus(",
             "void MouseHouse::failBottleCalibration(",
             "void MouseHouse::queueBottleState()", "void MouseHouse::muteDrinkEvents(",
-            "void MouseHouse::stopSession()",
+            "void MouseHouse::stopSession()", "bool MouseHouse::clearFeedJam()",
             "void MouseHouse::beginLickRecovery(", "void MouseHouse::serviceLickRecovery()",
             "void MouseHouse::reportLickRecovery(", "void MouseHouse::reportLickRecoveryDiagnostic(",
             "void MouseHouse::cancelLickRecovery()",
@@ -77,7 +87,7 @@ class NativeFirmwareTests(unittest.TestCase):
                 mode_settings[0], f"constexpr PelletMode PELLET_MODE = {mode};"
             ))
             sketch_variants[name] = variant
-        for name in ("replay", "qualification", "go_nogo", "fixed_ratio", "fixed_ratio_latched", "bottle_swap", "rtc", "behavior_session", "bottle_calibration"):
+        for name in ("replay", "qualification", "go_nogo", "free_feeding", "fixed_ratio", "fixed_ratio_latched", "bottle_swap", "rtc", "behavior_session", "bottle_calibration"):
             source_name = "fixed_ratio" if name == "fixed_ratio_latched" else name
             command = [
                 "g++", "-std=c++17", "-Wall", "-Wextra",
@@ -86,7 +96,7 @@ class NativeFirmwareTests(unittest.TestCase):
             ]
             if name in sketch_variants:
                 command.append(f'-DFIXED_RATIO_SKETCH="{sketch_variants[name]}"')
-            if name == "replay":
+            if name in ("replay", "qualification", "go_nogo", "free_feeding", "fixed_ratio", "fixed_ratio_latched"):
                 command.append(str(ROOT / "src/SerialTransport.cpp"))
             if name == "rtc":
                 command.insert(1, f"-I{NATIVE / 'rtc'}")
@@ -116,6 +126,23 @@ class NativeFirmwareTests(unittest.TestCase):
         for scenario in range(5):
             with self.subTest(scenario=scenario):
                 self.run_native("qualification", scenario)
+
+    def test_stop_cancels_all_feed_qualification_phases_and_simultaneous_pokes(self):
+        for scenario in range(5, 14):
+            with self.subTest(scenario=scenario):
+                self.run_native("qualification", scenario)
+
+    def test_nogo_rewards_and_accuracy_match_at_hold_release_boundaries(self):
+        for scenario in range(4, 16):
+            with self.subTest(scenario=scenario):
+                self.run_native("go_nogo", scenario)
+
+    def test_command_bursts_expose_stop_and_restart_to_tasks(self):
+        for name, scenario in (("go_nogo", 16), ("free_feeding", 0),
+                               ("fixed_ratio", 3), ("fixed_ratio_latched", 3),
+                               ("qualification", 14)):
+            with self.subTest(task=name):
+                self.run_native(name, scenario)
 
     def test_jam_blocks_trials_and_clear_jam_restores_eligibility(self):
         self.run_native("go_nogo", 0)

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <string>
 
 // Host-side boundaries only; the tests compile the production transport/sketches.
 inline unsigned long testMillis = 0;
@@ -13,6 +14,9 @@ inline long random(long) { return 0; }
 extern "C" inline uint64_t time_us_64() { return testMillis * 1000ULL; }
 
 struct FakeSerial {
+  std::string input;
+  int available() const { return input.size(); }
+  int read() { int value = input.front(); input.erase(0, 1); return value; }
   std::vector<uint8_t> output;
   int capacity = 32;
   explicit operator bool() const { return true; }

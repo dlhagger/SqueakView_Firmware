@@ -309,7 +309,38 @@ behavior, and hardware qualification plan.
 After the feeder exhausts its retry limit, it emits `FEED_JAM` and rejects new
 feed requests with `NACK,FEED,JAMMED`. After physically clearing the mechanism,
 send `CLEAR_JAM`; the controller responds with `ACK_CLEAR_JAM` and permits the
-next feed. Rebooting also clears the latch.
+next feed within the active session. `STOP` first stops any active feed and
+also clears the jam latch, including when the session is already stopped. This
+resets the retry count and preferred feed direction through the same reset used
+by `CLEAR_JAM`; it does not start feeding or remove a physical obstruction.
+The existing `ACK_STOP` format is unchanged. Rebooting also clears the latch.
+
+Every valid `STOP` receives one `ACK_STOP` in all tasks, including go/no-go,
+initial idle and repeated stops. The parser yields to the task after a session
+transition or STOP before processing another buffered command, so a combined
+`STOP\nSTART,30\n` cannot skip task cleanup. Sketches with delayed work can
+register `setStopHandler()`; it runs after shutdown and before the ACK, including
+on idle STOP, and must not start hardware or call `stopSession()` recursively.
+
+In `setup_debug`, STOP during a motor-test stage cancels delayed/active feed
+qualification and moves to `ABORTED`. Use `TEST,RESTART` to begin again. The
+camera-cycle STOP continues to advance to camera confirmation normally. A
+successful no-go hold uses the same reward/count path whether the threshold is
+observed while held or upon release; equality satisfies the hold requirement.
+
+The qualification GUI marks records saved only after both text and JSON files
+are written successfully. If saving fails, select a writable output directory
+and use **Retry saving record**, which remains available after disconnecting.
+
+Native regression tests (no hardware access):
+
+```sh
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests
+```
+
+These tests cover delayed STOP cancellation, simultaneous poke edges, all-task
+command bursts, no-go hold/release boundaries, and qualification save retries.
+Passing tests and builds do not establish electrical qualification.
 
 The Jetson utility records synchronization samples and estimates clock drift:
 

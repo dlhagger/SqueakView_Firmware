@@ -6,6 +6,7 @@
 #define FIXED_RATIO_SKETCH "../../examples/fixed_ratio/fixed_ratio.ino"
 #endif
 #include FIXED_RATIO_SKETCH
+#undef Serial
 
 unsigned eventCount(const char* name) {
   return std::count(mh.loggedEvents.begin(), mh.loggedEvents.end(), name);
@@ -159,6 +160,22 @@ void checkWatchdog() {
 int main(int argc, char** argv) {
   assert(argc == 2);
   int scenario = std::atoi(argv[1]);
+  if (scenario == 3) {
+    setup();
+    Serial.input = "START,30\n";
+    loop();
+    activePokesTowardReward = 1;
+    ignoreCurrentActivePoke = finishRatioBeforeSwitch = true;
+    taskRewardFeedInProgress = pendingRewardFeedStarted = true;
+    Serial.input = "STOP\nSTART,30\n";
+    loop();
+    assert(!mh.isRunning() && activePokesTowardReward == 0);
+    assert(!ignoreCurrentActivePoke && !finishRatioBeforeSwitch);
+    assert(!taskRewardFeedInProgress && !pendingRewardFeedStarted);
+    loop();
+    assert(mh.isRunning() && sessionWasRunning && mh.feedStarts == 0);
+    return 0;
+  }
   if (PELLET_MODE == LATCHED_PRESENCE) {
     checkLatchedPresence(scenario != 0);
   } else if (scenario == 2) {
